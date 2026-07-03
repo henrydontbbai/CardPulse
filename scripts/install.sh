@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 配置
-REPO_URL="https://github.com/你的用户名/CardPulse.git"
+REPO_URL="https://github.com/cardpulse/cardpulse.git"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="$HOME/.cardpulse"
 
@@ -118,15 +118,16 @@ setup_config() {
 # CardPulse 配置文件
 # 详细配置说明请参考 README.md
 
-vohive:
-  # VoHive 服务地址
+# 4G 模组管理服务配置
+gateway:
+  # 管理服务地址
   url: "http://localhost:7575"
   # API 认证 token（如果启用了认证）
   token: ""
 
 device:
   # 设备 ID（留空则自动使用所有设备）
-  # 在 VoHive Web 界面 → 设备管理 → 查看设备详情
+  # 在管理后台 → 设备管理 → 查看设备详情
   id: ""
 
 sms:

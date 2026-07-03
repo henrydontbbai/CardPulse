@@ -129,7 +129,7 @@ should_send() {
 
 # 获取设备列表
 get_devices() {
-    local vohive_url="$1"
+    local gateway_url="$1"
     local token="$2"
     local device_id="$3"
     
@@ -146,13 +146,13 @@ get_devices() {
     # 获取所有设备
     local response
     if [[ -n "$token" ]]; then
-        response=$(curl -s -H "Authorization: Bearer $token" "${vohive_url}/api/devices")
+        response=$(curl -s -H "Authorization: Bearer $token" "${gateway_url}/api/devices")
     else
-        response=$(curl -s "${vohive_url}/api/devices")
+        response=$(curl -s "${gateway_url}/api/devices")
     fi
     
     if [[ $? -ne 0 ]]; then
-        error "无法连接到 VoHive 服务"
+        error "无法连接到网关服务"
     fi
     
     # 解析设备 ID
@@ -171,7 +171,7 @@ if 'data' in data:
 
 # 发送短信
 send_sms() {
-    local vohive_url="$1"
+    local gateway_url="$1"
     local token="$2"
     local device_id="$3"
     local phone="$4"
@@ -194,12 +194,12 @@ EOF
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $token" \
             -d "$payload" \
-            "${vohive_url}/api/sms/send")
+            "${gateway_url}/api/sms/send")
     else
         response=$(curl -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -d "$payload" \
-            "${vohive_url}/api/sms/send")
+            "${gateway_url}/api/sms/send")
     fi
     
     http_code=$(echo "$response" | tail -n1)
@@ -341,8 +341,8 @@ main() {
     fi
     
     # 读取配置
-    local vohive_url=$(read_config ".vohive.url" "http://localhost:7575")
-    local vohive_token=$(read_config ".vohive.token" "")
+    local gateway_url=$(read_config ".gateway.url" "http://localhost:7575")
+    local gateway_token=$(read_config ".gateway.token" "")
     local device_id=$(read_config ".device.id" "")
     local phone=$(read_config ".sms.phone" "")
     local message=$(read_config ".sms.message" "$DEFAULT_MESSAGE")
@@ -361,13 +361,13 @@ main() {
     fi
     
     info "开始执行保号任务..."
-    info "VoHive: $vohive_url"
+    info "网关: $gateway_url"
     info "目标号码: $phone"
     info "间隔天数: $interval_days"
     
     # 获取设备列表
     local devices
-    devices=$(get_devices "$vohive_url" "$vohive_token" "$device_id")
+    devices=$(get_devices "$gateway_url" "$gateway_token" "$device_id")
     
     if [[ -z "$devices" ]]; then
         error "未找到可用设备"
@@ -384,7 +384,7 @@ main() {
         
         info "使用设备: $device 发送短信..."
         
-        if send_sms "$vohive_url" "$vohive_token" "$device" "$phone" "$message"; then
+        if send_sms "$gateway_url" "$gateway_token" "$device" "$phone" "$message"; then
             info "设备 $device 发送成功"
             ((success_count++))
         else

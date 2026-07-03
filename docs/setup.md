@@ -6,7 +6,7 @@
 
 1. [硬件准备](#1-硬件准备)
 2. [系统安装](#2-系统安装)
-3. [VoHive 部署](#3-vohive-部署)
+3. [4G 模组服务部署](#3-4g-模组服务部署)
 4. [CardPulse 安装](#4-cardpulse-安装)
 5. [配置说明](#5-配置说明)
 6. [测试验证](#6-测试验证)
@@ -22,7 +22,7 @@
 | 设备 | 型号 | 说明 |
 |------|------|------|
 | 开发板 | 树莓派 4B/5 或 x86 工控机 | 2GB+ 内存，支持 Linux |
-| 4G 模组 | DJI Cell 模块 (基于 EC25) | USB 供电 + 数据传输 |
+| 4G 模组 | Quectel EC20/EC25 或同等模组 | USB 供电 + 数据传输 |
 | SIM 卡 | Google Voice 卡 | 待保号的卡 |
 | 存储 | 16GB+ SD 卡/SSD | 系统 + 日志存储 |
 | 电源 | 5V/3A 适配器 | 稳定供电，24 小时运行 |
@@ -31,8 +31,8 @@
 
 ```
 ┌─────────────────┐     USB      ┌─────────────────┐
-│    开发板        │──────────────│   大疆 4G 模组   │
-│  (树莓派/工控机)  │              │   (DJI Cell)    │
+│    开发板        │──────────────│    4G 模组      │
+│  (树莓派/工控机)  │              │  (EC20/EC25)    │
 └────────┬────────┘              └────────┬────────┘
          │                                │
          │ 以太网/WiFi                    │ 4G 网络
@@ -89,107 +89,49 @@ sudo apt install -y \
 
 ---
 
-## 3. VoHive 部署
+## 3. 4G 模组服务部署
 
-### 3.1 方式一：直接安装（推荐）
+CardPulse 需要配合 4G 模组管理服务使用。以下提供几种常见的部署方案：
 
-```bash
-# 创建目录
-mkdir -p ~/vohive/{config,data,logs}
-cd ~/vohive
+### 3.1 使用预编译的管理服务
 
-# 下载最新版本（根据你的架构选择）
-# 树莓派 4B/5 (ARM64)
-wget https://github.com/iniwex5/vohive/releases/latest/download/vohive_linux_arm64
+如果你已有 4G 模组管理服务，跳过此步骤。
 
-# x86 工控机
-# wget https://github.com/iniwex5/vohive/releases/latest/download/vohive_linux_amd64
+常见的 4G 模组管理方案：
+- ** Quectel QMI **：通过 QMI 协议管理模组
+- ** ModemManager **：通用调制解调器管理器
+- ** 自定义 AT 命令服务 **：基于串口通信
 
-# 添加执行权限
-chmod +x vohive_linux_arm64
-
-# 创建配置文件
-cat > config/config.yaml << 'EOF'
-server:
-  port: 7575
-  debug: false
-
-web:
-  username: admin
-  password: 你的密码
-
-devices: []
-
-vowifi:
-  enabled: false
-
-webhook:
-  enabled: false
-EOF
-
-# 启动服务
-./vohive_linux_arm64 -c config/config.yaml
-```
-
-### 3.2 方式二：Docker 安装
+### 3.2 手动配置模组
 
 ```bash
-# 安装 Docker
-curl -fsSL https://get.docker.com | sh
+# 检查 USB 设备
+lsusb
 
-# 添加当前用户到 docker 组
-sudo usermod -aG docker $USER
-newgrp docker
+# 检查串口设备
+ls /dev/ttyUSB*
 
-# 创建配置目录
-mkdir -p ~/vohive/{config,data,logs}
+# 使用 minicom 调试
+sudo minicom -D /dev/ttyUSB0
 
-# 创建 docker-compose.yml
-cat > ~/vohive/docker-compose.yml << 'EOF'
-services:
-  vohive:
-    image: iniwex/vohive:latest
-    container_name: vohive
-    restart: unless-stopped
-    ports:
-      - "7575:7575"
-    volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./logs:/app/logs
-    environment:
-      - TZ=Asia/Shanghai
-    privileged: true
-    devices:
-      - /dev/:/dev/
-    network_mode: host
-EOF
-
-# 启动服务
-cd ~/vohive
-docker compose up -d
+# 测试 AT 命令
+AT
+ATI
+AT+CSQ
 ```
 
-### 3.3 验证 VoHive
+### 3.3 配置网络接口
 
 ```bash
-# 检查服务状态
-curl http://localhost:7575/api/health
+# 查看网络接口
+ip link show
 
-# 打开浏览器访问
-# http://你的开发板IP:7575
-# 默认账号: admin / admin123
+# 配置 APN（根据你的运营商）
+sudo nmcli connection add type gsm con-name "4g" apn "your_apn"
+
+# 启动连接
+sudo nmcli connection up 4g
 ```
-
-### 3.4 配置 4G 模组
-
-1. 登录 VoHive Web 界面
-2. 进入「设备管理」
-3. 系统会自动发现 USB 连接的 4G 模组
-4. 点击设备进行配置：
-   - 设置设备名称
-   - 选择网络模式
-   - 配置 APN（如果需要）
 
 ---
 
@@ -199,7 +141,7 @@ curl http://localhost:7575/api/health
 
 ```bash
 # 下载安装脚本
-wget https://raw.githubusercontent.com/你的用户名/CardPulse/main/scripts/install.sh
+wget https://raw.githubusercontent.com/cardpulse/cardpulse/main/scripts/install.sh
 
 # 添加执行权限
 chmod +x install.sh
@@ -212,7 +154,7 @@ sudo ./install.sh
 
 ```bash
 # 克隆仓库
-git clone https://github.com/你的用户名/CardPulse.git
+git clone https://github.com/cardpulse/cardpulse.git
 cd CardPulse
 
 # 复制脚本
@@ -238,11 +180,11 @@ vim ~/.cardpulse/config.yaml
 
 ### 5.2 配置项说明
 
-#### VoHive 连接配置
+#### 网关连接配置
 
 ```yaml
-vohive:
-  url: "http://localhost:7575"  # VoHive 服务地址
+gateway:
+  url: "http://localhost:7575"  # 4G 模组管理服务地址
   token: ""                      # API 认证 token（可选）
 ```
 
@@ -255,7 +197,7 @@ device:
 
 **如何获取设备 ID：**
 
-1. 登录 VoHive Web 界面
+1. 登录 4G 模组管理后台
 2. 进入「设备管理」
 3. 点击设备 → 查看详情
 4. 复制设备 ID
@@ -286,7 +228,7 @@ notify:
 ### 6.1 手动测试发送
 
 ```bash
-# 使用 VoHive API 直接测试
+# 使用管理服务 API 直接测试
 curl -X POST http://localhost:7575/api/sms/send \
   -H "Content-Type: application/json" \
   -d '{
@@ -359,11 +301,11 @@ sudo systemctl start cardpulse.service
 
 ## 8. 常见问题
 
-### Q1: 无法连接到 VoHive
+### Q1: 无法连接到 4G 模组管理服务
 
 ```bash
-# 检查 VoHive 是否运行
-ps aux | grep vohive
+# 检查服务是否运行
+ps aux | grep 管理服务进程名
 
 # 检查端口是否监听
 netstat -tlnp | grep 7575
@@ -389,8 +331,8 @@ dmesg | tail -20
 ### Q3: 短信发送失败
 
 ```bash
-# 检查 VoHive 日志
-tail -f ~/vohive/logs/app.log
+# 检查管理服务日志
+tail -f /var/log/管理服务日志
 
 # 手动测试 API
 curl -X POST http://localhost:7575/api/sms/send \
@@ -460,5 +402,4 @@ rm -rf ~/.cardpulse
 
 ## 获取帮助
 
-- GitHub Issues: https://github.com/你的用户名/CardPulse/issues
-- VoHive 文档: https://github.com/iniwex5/vohive
+- GitHub Issues: https://github.com/cardpulse/cardpulse/issues

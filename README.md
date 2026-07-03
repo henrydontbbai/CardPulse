@@ -7,7 +7,7 @@
 
 ## 简介
 
-CardPulse 是一个轻量级的 SIM 卡保活工具，基于 [VoHive](https://github.com/iniwex5/vohive) 实现定时短信保号功能。
+CardPulse 是一个轻量级的 SIM 卡保活工具，通过定时发送短信实现号码保活功能。
 
 专为 **GG 卡 (Google Voice)** 等需要定期发送短信以防止号码回收的场景设计。
 
@@ -22,25 +22,18 @@ CardPulse 是一个轻量级的 SIM 卡保活工具，基于 [VoHive](https://gi
 
 ## 快速开始
 
-### 1. 部署 VoHive
-
-```bash
-# 参考 VoHive 文档部署服务
-# https://github.com/iniwex5/vohive
-```
-
-### 2. 安装 CardPulse
+### 1. 安装 CardPulse
 
 ```bash
 # 一键安装
-curl -fsSL https://raw.githubusercontent.com/你的用户名/CardPulse/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cardpulse/cardpulse/main/scripts/install.sh | bash
 ```
 
 或手动安装：
 
 ```bash
 # 克隆仓库
-git clone https://github.com/你的用户名/CardPulse.git
+git clone https://github.com/cardpulse/cardpulse.git
 cd CardPulse
 
 # 复制配置文件
@@ -54,17 +47,18 @@ sudo cp scripts/keepalive.sh /usr/local/bin/cardpulse
 sudo chmod +x /usr/local/bin/cardpulse
 ```
 
-### 3. 配置
+### 2. 配置
 
 编辑 `~/.cardpulse/config.yaml`：
 
 ```yaml
-vohive:
+# 4G 模组管理服务配置
+gateway:
   url: "http://localhost:7575"
   token: ""  # 可选，如果启用了 API 认证
 
 device:
-  id: "你的设备ID"  # 在 VoHive Web 界面查看
+  id: ""  # 留空使用所有设备，或指定设备 ID
 
 sms:
   phone: "+1234567890"  # GG 卡号码
@@ -78,7 +72,7 @@ notify:
     chat_id: ""
 ```
 
-### 4. 设置定时任务
+### 3. 设置定时任务
 
 ```bash
 # 添加 cron 任务（每天凌晨 2 点检查）
@@ -90,7 +84,7 @@ sudo cp scripts/cardpulse.timer /etc/systemd/system/
 sudo systemctl enable --now cardpulse.timer
 ```
 
-### 5. 验证
+### 4. 验证
 
 ```bash
 # 手动执行一次
@@ -125,7 +119,7 @@ CardPulse/
 
 ### Q: 如何查看设备 ID？
 
-登录 VoHive Web 界面 → 设备管理 → 点击设备 → 查看设备详情中的 ID。
+登录 4G 模组管理后台 → 设备管理 → 点击设备 → 查看设备详情中的 ID。
 
 ### Q: GG 卡保号周期是多少天？
 
@@ -138,10 +132,6 @@ Google Voice 要求每 **179 天**至少有一次活动（发送/接听电话或
 ### Q: 如何同时保多张卡？
 
 在配置文件中添加多个设备配置，或创建多个配置文件分别运行。
-
-## 致谢
-
-- [VoHive](https://github.com/iniwex5/vohive) - 强大的 4G/5G 模组管理平台
 
 ## License
 

@@ -5,14 +5,14 @@
 # cp config.example.yaml ~/.cardpulse/config.yaml
 # ============================================================================
 
-# VoHive 服务配置
-vohive:
-  # VoHive 服务地址
-  # 如果 VoHive 运行在本机，保持默认即可
+# 4G 模组管理服务配置
+gateway:
+  # 管理服务地址
+  # 如果服务运行在本机，保持默认即可
   url: "http://localhost:7575"
   
   # API 认证 token（可选）
-  # 如果在 VoHive 中启用了 API 认证，需要填入 token
+  # 如果在管理后台中启用了 API 认证，需要填入 token
   # 否则留空
   token: ""
 
@@ -23,7 +23,7 @@ device:
   # 指定设备 ID 则只使用该设备发送短信
   # 
   # 如何查看设备 ID：
-  # 1. 登录 VoHive Web 界面
+  # 1. 登录管理后台
   # 2. 进入「设备管理」
   # 3. 点击设备查看详细信息中的 ID
   id: ""
