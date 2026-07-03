@@ -5,85 +5,43 @@
 # cp config.example.yaml ~/.cardpulse/config.yaml
 # ============================================================================
 
-# 4G 模组管理服务配置
-gateway:
-  # 管理服务地址
-  # 如果服务运行在本机，保持默认即可
-  url: "http://localhost:7575"
+# 串口配置
+serial:
+  # 串口设备路径
+  # 常见路径:
+  #   /dev/ttyUSB0 - USB 串口（最常见）
+  #   /dev/ttyACM0 - USB CDC ACM 设备
+  #   /dev/ttyS0   - 原生串口
+  port: "/dev/ttyUSB0"
   
-  # API 认证 token（可选）
-  # 如果在管理后台中启用了 API 认证，需要填入 token
-  # 否则留空
-  token: ""
-
-# 设备配置
-device:
-  # 设备 ID（可选）
-  # 留空则自动使用所有可用设备
-  # 指定设备 ID 则只使用该设备发送短信
-  # 
-  # 如何查看设备 ID：
-  # 1. 登录管理后台
-  # 2. 进入「设备管理」
-  # 3. 点击设备查看详细信息中的 ID
-  id: ""
+  # 波特率
+  # 常见值: 9600, 19200, 38400, 57600, 115200
+  baudrate: 115200
+  
+  # 自动检测串口设备
+  # 如果为 true，会自动查找 /dev/ttyUSB* 或 /dev/ttyACM*
+  # 优先使用手动配置的 port
+  auto_detect: true
 
 # 短信配置
 sms:
   # 接收短信的手机号码
   # 必须包含国家代码
-  # 例如：+1 表示美国，+86 表示中国
-  phone: "+1234567890"
+  # 例如: +1 表示美国, +86 表示中国
+  phone: "+8613800138000"
   
   # 短信内容
   # 任意内容即可，只要能成功发送
   # Google Voice 卡保号只需有发送记录
+  # 支持中文（自动使用 PDU 模式）
   message: "Hello from CardPulse"
   
   # 保号间隔天数
   # Google Voice 卡建议设置为 179 天（略小于 180 天限制）
   interval_days: 179
-
-# 通知配置（可选）
-notify:
-  # 是否启用通知
-  enabled: false
   
-  # Telegram 通知
-  # 需要先创建 Telegram Bot 并获取 token
-  telegram:
-    bot_token: ""
-    chat_id: ""
-  
-  # Bark 通知（iOS 推送）
-  # 需要安装 Bark 应用并获取推送 key
-  bark:
-    url: ""
-  
-  # Webhook 通知
-  webhook:
-    url: ""
-    method: "POST"
-    headers:
-      Content-Type: "application/json"
-
-# ============================================================================
-# 高级配置（通常无需修改）
-# ============================================================================
-
-# 日志配置
-logging:
-  # 日志级别: DEBUG, INFO, WARN, ERROR
-  level: "INFO"
-  
-  # 日志文件路径（相对于配置目录）
-  file: "logs/cardpulse.log"
-  
-  # 日志文件最大大小（MB）
-  max_size: 10
-  
-  # 保留日志文件数量
-  max_backups: 5
+  # 发送超时（秒）
+  timeout: 30
 
 # 重试配置
 retry:
@@ -92,3 +50,87 @@ retry:
   
   # 重试间隔（秒）
   interval: 10
+
+# ============================================================================
+# 通知配置（可选）
+# ============================================================================
+# 启用通知后，会在每次发送成功/失败时推送通知
+# 支持 7 种主流通讯软件
+
+notify:
+  # 是否启用通知
+  enabled: false
+  
+  # Telegram 通知
+  # 需要先创建 Telegram Bot 并获取 token
+  # 创建方法: https://core.telegram.org/bots#how-do-i-create-a-bot
+  telegram:
+    enabled: false
+    bot_token: ""    # Bot Token (格式: 123456789:ABCdefGHIjklMNOpqr)
+    chat_id: ""      # Chat ID (可通过 @userinfobot 获取)
+  
+  # 微信通知（Server酱）
+  # 需要注册 Server酱 并获取 SendKey
+  # 注册地址: https://sct.ftqq.com/
+  wechat:
+    enabled: false
+    send_key: ""     # SendKey
+  
+  # 企业微信机器人通知
+  # 需要创建企业微信群机器人并获取 webhook_url
+  # 创建方法: 群聊 → 群机器人 → 添加机器人
+  wecom:
+    enabled: false
+    webhook_url: ""  # Webhook URL
+  
+  # QQ 通知（Qmsg）
+  # 需要注册 Qmsg 并获取 key
+  # 注册地址: https://qmsg.zendee.cn/
+  qq:
+    enabled: false
+    qmsg_key: ""     # Qmsg Key
+  
+  # 飞书通知
+  # 需要创建飞书自定义机器人并获取 webhook_url
+  # 创建方法: 群设置 → 群机器人 → 添加自定义机器人
+  feishu:
+    enabled: false
+    webhook_url: ""  # Webhook URL
+  
+  # 钉钉通知
+  # 需要创建钉钉自定义机器人并获取 webhook_url
+  # 创建方法: 群设置 → 智能群助手 → 添加机器人 → 自定义
+  dingtalk:
+    enabled: false
+    webhook_url: ""  # Webhook URL
+    secret: ""       # 加签密钥（可选，用于安全验证）
+  
+  # Bark 通知（iOS）
+  # 需要安装 Bark 应用并获取推送 key
+  # App Store 搜索: Bark
+  bark:
+    enabled: false
+    url: ""          # Bark 推送 URL (格式: https://api.day.app/YOUR_KEY)
+  
+  # Email 通知
+  # 需要配置 SMTP 服务器信息
+  email:
+    enabled: false
+    smtp_host: ""    # SMTP 服务器地址
+    smtp_port: 465   # SMTP 端口（465=SSL, 587=TLS）
+    username: ""     # 邮箱用户名
+    password: ""     # 邮箱密码或授权码
+    from: ""         # 发件人邮箱
+    to: ""           # 收件人邮箱
+    use_ssl: true    # 是否使用 SSL
+
+# ============================================================================
+# 日志配置（通常无需修改）
+# ============================================================================
+
+logging:
+  # 日志级别: DEBUG, INFO, WARN, ERROR
+  level: "INFO"
+  
+  # 日志文件路径（相对于配置目录）
+  file: "logs/cardpulse.log"

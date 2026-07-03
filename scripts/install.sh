@@ -13,9 +13,11 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 配置
-REPO_URL="https://github.com/cardpulse/cardpulse.git"
+REPO_URL="https://github.com/henrydontbbai/CardPulse.git"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="$HOME/.cardpulse"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 info() {
     echo -e "${GREEN}[INFO]${NC} $*"
@@ -64,46 +66,72 @@ check_system() {
             ARCH="armv7"
             ;;
         *)
-            error "不支持的架构: $arch"
+            warn "未知架构: $arch，继续安装"
             ;;
     esac
 }
 
 # 安装依赖
 install_deps() {
-    info "安装依赖..."
+    info "检查依赖..."
     
-    if command -v apt-get &> /dev/null; then
-        apt-get update
-        apt-get install -y curl jq
-    elif command -v yum &> /dev/null; then
-        yum install -y curl jq
-    elif command -v dnf &> /dev/null; then
-        dnf install -y curl jq
-    elif command -v pacman &> /dev/null; then
-        pacman -S --noconfirm curl jq
-    else
-        warn "无法自动安装依赖，请手动安装: curl, jq"
+    # 检查必要工具
+    local deps=("curl" "stty")
+    local missing=()
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing+=("$dep")
+        fi
+    done
+    
+    # 检查 YAML 解析工具
+    if ! command -v yq &> /dev/null && ! command -v python3 &> /dev/null; then
+        missing+=("yq 或 python3")
     fi
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        warn "缺少依赖: ${missing[*]}"
+        info "尝试安装依赖..."
+        
+        if command -v apt-get &> /dev/null; then
+            apt-get update
+            apt-get install -y curl python3 python3-yaml
+        elif command -v yum &> /dev/null; then
+            yum install -y curl python3 python3-pyyaml
+        elif command -v dnf &> /dev/null; then
+            dnf install -y curl python3 python3-pyyaml
+        elif command -v pacman &> /dev/null; then
+            pacman -S --noconfirm curl python python-yaml
+        else
+            warn "无法自动安装依赖，请手动安装: curl, python3, python3-yaml"
+        fi
+    fi
+    
+    info "✓ 依赖检查完成"
 }
 
-# 下载并安装 CardPulse
+# 安装 CardPulse
 install_cardpulse() {
     info "安装 CardPulse..."
     
-    # 创建临时目录
-    local tmp_dir=$(mktemp -d)
-    trap "rm -rf $tmp_dir" EXIT
+    # 创建安装目录
+    mkdir -p "$INSTALL_DIR"
     
-    # 下载仓库
-    info "下载 CardPulse..."
-    git clone --depth 1 "$REPO_URL" "$tmp_dir"
-    
-    # 安装脚本
-    cp "$tmp_dir/scripts/keepalive.sh" "$INSTALL_DIR/cardpulse"
+    # 复制文件
+    cp "$PROJECT_DIR/bin/cardpulse" "$INSTALL_DIR/cardpulse"
     chmod +x "$INSTALL_DIR/cardpulse"
     
+    # 复制库文件
+    mkdir -p "/opt/cardpulse/lib"
+    cp "$PROJECT_DIR/lib/"*.sh "/opt/cardpulse/lib/"
+    chmod +x /opt/cardpulse/lib/*.sh
+    
+    # 创建符号链接
+    ln -sf /opt/cardpulse/lib /usr/local/lib/cardpulse
+    
     info "CardPulse 已安装到 $INSTALL_DIR/cardpulse"
+    info "库文件已安装到 /opt/cardpulse/lib/"
 }
 
 # 创建配置目录
@@ -111,58 +139,34 @@ setup_config() {
     info "设置配置目录..."
     
     mkdir -p "$CONFIG_DIR"
+    mkdir -p "$CONFIG_DIR/state"
+    mkdir -p "$CONFIG_DIR/logs"
     
     if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
         info "创建配置文件..."
-        cat > "$CONFIG_DIR/config.yaml" << 'EOF'
-# CardPulse 配置文件
-# 详细配置说明请参考 README.md
-
-# 4G 模组管理服务配置
-gateway:
-  # 管理服务地址
-  url: "http://localhost:7575"
-  # API 认证 token（如果启用了认证）
-  token: ""
-
-device:
-  # 设备 ID（留空则自动使用所有设备）
-  # 在管理后台 → 设备管理 → 查看设备详情
-  id: ""
-
-sms:
-  # 接收短信的手机号码
-  # GG 卡请使用 Google Voice 注册的号码
-  phone: "+1234567890"
-  
-  # 短信内容（任意内容即可）
-  message: "Hello from CardPulse"
-  
-  # 保号间隔天数（GG 卡建议 179 天）
-  interval_days: 179
-
-# 通知配置（可选）
-notify:
-  enabled: false
-  
-  # Telegram 通知
-  # telegram:
-  #   bot_token: "your_bot_token"
-  #   chat_id: "your_chat_id"
-  
-  # Bark 通知（iOS）
-  # bark:
-  #   url: "https://api.day.app/your_key"
-EOF
+        cp "$PROJECT_DIR/config/config.example.yaml" "$CONFIG_DIR/config.yaml"
         
         info "配置文件已创建: $CONFIG_DIR/config.yaml"
         warn "请编辑配置文件填入你的信息！"
     else
         info "配置文件已存在，跳过创建"
     fi
+}
+
+# 设置串口权限
+setup_permissions() {
+    info "设置串口权限..."
     
-    # 创建状态和日志目录
-    mkdir -p "$CONFIG_DIR/state" "$CONFIG_DIR/logs"
+    # 将当前用户添加到 dialout 组
+    local current_user="${SUDO_USER:-$USER}"
+    
+    if id -nG "$current_user" | grep -q "dialout"; then
+        info "用户 $current_user 已在 dialout 组中"
+    else
+        usermod -aG dialout "$current_user"
+        info "已将用户 $current_user 添加到 dialout 组"
+        warn "需要重新登录才能生效"
+    fi
 }
 
 # 设置定时任务
@@ -239,9 +243,10 @@ show_info() {
     echo "状态目录: $CONFIG_DIR/state/"
     echo ""
     echo "下一步："
-    echo "  1. 编辑配置文件: vim $CONFIG_DIR/config.yaml"
-    echo "  2. 测试运行: sudo cardpulse"
-    echo "  3. 查看日志: tail -f $CONFIG_DIR/logs/cardpulse.log"
+    echo "  1. 编辑配置文件: sudo vim $CONFIG_DIR/config.yaml"
+    echo "  2. 查看模组信息: cardpulse --info"
+    echo "  3. 测试发送: cardpulse --test"
+    echo "  4. 查看状态: cardpulse --status"
     echo ""
     echo "定时任务已配置，将在每天凌晨 2 点自动执行。"
     echo ""
@@ -259,6 +264,7 @@ main() {
     install_deps
     install_cardpulse
     setup_config
+    setup_permissions
     setup_cron
     setup_systemd
     show_info

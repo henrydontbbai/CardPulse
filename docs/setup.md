@@ -6,12 +6,11 @@
 
 1. [硬件准备](#1-硬件准备)
 2. [系统安装](#2-系统安装)
-3. [4G 模组服务部署](#3-4g-模组服务部署)
-4. [CardPulse 安装](#4-cardpulse-安装)
-5. [配置说明](#5-配置说明)
-6. [测试验证](#6-测试验证)
-7. [定时任务](#7-定时任务)
-8. [常见问题](#8-常见问题)
+3. [CardPulse 安装](#3-cardpulse-安装)
+4. [配置说明](#4-配置说明)
+5. [测试验证](#5-测试验证)
+6. [定时任务](#6-定时任务)
+7. [常见问题](#7-常见问题)
 
 ---
 
@@ -81,241 +80,226 @@ sudo apt install -y \
     curl \
     wget \
     git \
-    jq \
-    unzip \
-    htop \
-    tmux
+    python3 \
+    python3-yaml \
+    minicom
 ```
 
 ---
 
-## 3. 4G 模组服务部署
+## 3. CardPulse 安装
 
-CardPulse 需要配合 4G 模组管理服务使用。以下提供几种常见的部署方案：
-
-### 3.1 使用预编译的管理服务
-
-如果你已有 4G 模组管理服务，跳过此步骤。
-
-常见的 4G 模组管理方案：
-- ** Quectel QMI **：通过 QMI 协议管理模组
-- ** ModemManager **：通用调制解调器管理器
-- ** 自定义 AT 命令服务 **：基于串口通信
-
-### 3.2 手动配置模组
+### 3.1 克隆仓库
 
 ```bash
-# 检查 USB 设备
-lsusb
-
-# 检查串口设备
-ls /dev/ttyUSB*
-
-# 使用 minicom 调试
-sudo minicom -D /dev/ttyUSB0
-
-# 测试 AT 命令
-AT
-ATI
-AT+CSQ
-```
-
-### 3.3 配置网络接口
-
-```bash
-# 查看网络接口
-ip link show
-
-# 配置 APN（根据你的运营商）
-sudo nmcli connection add type gsm con-name "4g" apn "your_apn"
-
-# 启动连接
-sudo nmcli connection up 4g
-```
-
----
-
-## 4. CardPulse 安装
-
-### 4.1 一键安装
-
-```bash
-# 下载安装脚本
-wget https://raw.githubusercontent.com/cardpulse/cardpulse/main/scripts/install.sh
-
-# 添加执行权限
-chmod +x install.sh
-
-# 运行安装
-sudo ./install.sh
-```
-
-### 4.2 手动安装
-
-```bash
-# 克隆仓库
-git clone https://github.com/cardpulse/cardpulse.git
+git clone https://github.com/henrydontbbai/CardPulse.git
 cd CardPulse
+```
 
-# 复制脚本
-sudo cp scripts/keepalive.sh /usr/local/bin/cardpulse
+### 3.2 运行安装脚本
+
+```bash
+sudo ./scripts/install.sh
+```
+
+安装脚本会：
+1. 检查并安装依赖
+2. 复制文件到系统目录
+3. 创建配置目录
+4. 设置串口权限
+5. 配置 cron 定时任务
+6. 创建 systemd 服务
+
+### 3.3 手动安装（可选）
+
+```bash
+# 复制可执行文件
+sudo cp bin/cardpulse /usr/local/bin/
 sudo chmod +x /usr/local/bin/cardpulse
+
+# 复制库文件
+sudo mkdir -p /opt/cardpulse/lib
+sudo cp lib/*.sh /opt/cardpulse/lib/
+sudo chmod +x /opt/cardpulse/lib/*.sh
 
 # 创建配置目录
 mkdir -p ~/.cardpulse/{state,logs}
-
-# 复制配置文件
 cp config/config.example.yaml ~/.cardpulse/config.yaml
 ```
 
 ---
 
-## 5. 配置说明
+## 4. 配置说明
 
-### 5.1 编辑配置文件
+### 4.1 编辑配置文件
 
 ```bash
 vim ~/.cardpulse/config.yaml
 ```
 
-### 5.2 配置项说明
-
-#### 网关连接配置
+### 4.2 串口配置
 
 ```yaml
-gateway:
-  url: "http://localhost:7575"  # 4G 模组管理服务地址
-  token: ""                      # API 认证 token（可选）
+serial:
+  # 串口设备路径
+  port: "/dev/ttyUSB0"
+  
+  # 波特率（通常为 115200）
+  baudrate: 115200
+  
+  # 自动检测（优先使用手动配置的端口）
+  auto_detect: true
 ```
 
-#### 设备配置
+**如何找到串口设备：**
 
-```yaml
-device:
-  id: ""  # 留空使用所有设备，或指定设备 ID
+```bash
+# 查看 USB 串口设备
+ls /dev/ttyUSB* /dev/ttyACM*
+
+# 查看设备信息
+dmesg | grep tty
 ```
 
-**如何获取设备 ID：**
-
-1. 登录 4G 模组管理后台
-2. 进入「设备管理」
-3. 点击设备 → 查看详情
-4. 复制设备 ID
-
-#### 短信配置
+### 4.3 短信配置
 
 ```yaml
 sms:
-  phone: "+1234567890"      # 接收号码（必须包含国家代码）
-  message: "Hello"           # 短信内容
-  interval_days: 179         # 保号间隔天数
+  # 接收号码（必须包含国家代码）
+  phone: "+8613800138000"
+  
+  # 短信内容（支持中文）
+  message: "Hello from CardPulse"
+  
+  # 保号间隔天数（GG 卡建议 179 天）
+  interval_days: 179
+  
+  # 发送超时（秒）
+  timeout: 30
 ```
 
-#### 通知配置（可选）
+### 4.4 通知配置（可选）
 
 ```yaml
 notify:
   enabled: true
+  
+  # Telegram
   telegram:
-    bot_token: "123456:ABC-DEF..."
+    enabled: true
+    bot_token: "123456789:ABCdefGHIjklMNOpqr"
     chat_id: "123456789"
+  
+  # 微信（Server酱）
+  wechat:
+    enabled: false
+    send_key: ""
+  
+  # 其他通知渠道...
 ```
 
 ---
 
-## 6. 测试验证
+## 5. 测试验证
 
-### 6.1 手动测试发送
+### 5.1 查看模组信息
 
 ```bash
-# 使用管理服务 API 直接测试
-curl -X POST http://localhost:7575/api/sms/send \
-  -H "Content-Type: application/json" \
-  -d '{
-    "device_id": "你的设备ID",
-    "phone": "+1234567890",
-    "message": "测试短信"
-  }'
+cardpulse --info
 ```
 
-### 6.2 测试 CardPulse
+输出示例：
+```
+=== 模组信息 ===
+设备: /dev/ttyUSB0
+波特率: 115200
+
+厂商: Quectel
+型号: EC25E
+IMEI: 860000000000000
+版本: ...
+
+=== 状态信息 ===
+SIM 卡: READY
+信号强度: 18
+网络状态: 1
+运营商: CMCC
+```
+
+### 5.2 测试发送
 
 ```bash
-# 强制发送（忽略间隔检查）
-cardpulse --force
+cardpulse --test
+```
 
-# 查看状态
+### 5.3 查看状态
+
+```bash
 cardpulse --status
-
-# 查看日志
-tail -f ~/.cardpulse/logs/cardpulse.log
 ```
 
-### 6.3 验证结果
+输出示例：
+```
+=== CardPulse 状态 ===
+
+上次发送: 2026-07-04 12:00:00
+距今: 0 天
+状态: 需要发送
+
+配置间隔: 179 天
+
+=== 最近记录 ===
+  2026-07-04 12:00:00 - success
+```
+
+### 5.4 手动测试 API
 
 ```bash
-# 检查状态文件
-cat ~/.cardpulse/state/last_success
+# 直接调用脚本
+cardpulse --test
 
-# 查看日志
-tail -20 ~/.cardpulse/logs/cardpulse.log
+# 或手动执行
+cardpulse --force
 ```
 
 ---
 
-## 7. 定时任务
+## 6. 定时任务
 
-### 7.1 使用 cron（简单）
+### 6.1 使用 cron（已自动配置）
+
+安装脚本已自动添加 cron 任务：
 
 ```bash
-# 编辑 crontab
-crontab -e
+# 查看 cron 任务
+crontab -l
 
-# 添加以下行（每天凌晨 2 点执行）
-0 2 * * * /usr/local/bin/cardpulse >> ~/.cardpulse/logs/cardpulse.log 2>&1
+# 手动添加（如果需要）
+crontab -e
+# 添加：0 2 * * * /usr/local/bin/cardpulse >> ~/.cardpulse/logs/cardpulse.log 2>&1
 ```
 
-### 7.2 使用 systemd timer（推荐）
+### 6.2 使用 systemd timer（推荐）
 
 ```bash
-# 复制服务文件
-sudo cp scripts/cardpulse.service /etc/systemd/system/
-sudo cp scripts/cardpulse.timer /etc/systemd/system/
-
-# 编辑服务文件中的用户路径
-sudo sed -i 's|/root/.cardpulse|/home/你的用户名/.cardpulse|g' /etc/systemd/system/cardpulse.service
-
-# 启用并启动定时器
-sudo systemctl daemon-reload
-sudo systemctl enable cardpulse.timer
+# 启动定时器
 sudo systemctl start cardpulse.timer
 
-# 查看定时器状态
+# 查看状态
 sudo systemctl status cardpulse.timer
 
-# 手动执行一次测试
+# 手动执行一次
 sudo systemctl start cardpulse.service
+
+# 查看日志
+journalctl -u cardpulse.service
 ```
 
 ---
 
-## 8. 常见问题
+## 7. 常见问题
 
-### Q1: 无法连接到 4G 模组管理服务
-
-```bash
-# 检查服务是否运行
-ps aux | grep 管理服务进程名
-
-# 检查端口是否监听
-netstat -tlnp | grep 7575
-
-# 检查防火墙
-sudo ufw status
-sudo ufw allow 7575/tcp
-```
-
-### Q2: 无法识别 4G 模组
+### Q1: 未找到串口设备
 
 ```bash
 # 检查 USB 设备
@@ -324,23 +308,46 @@ lsusb
 # 检查串口设备
 ls /dev/ttyUSB*
 
-# 查看 dmesg 日志
+# 查看内核日志
 dmesg | tail -20
 ```
 
-### Q3: 短信发送失败
+### Q2: 权限不足
 
 ```bash
-# 检查管理服务日志
-tail -f /var/log/管理服务日志
+# 将用户添加到 dialout 组
+sudo usermod -aG dialout $USER
 
-# 手动测试 API
-curl -X POST http://localhost:7575/api/sms/send \
-  -H "Content-Type: application/json" \
-  -d '{"device_id":"test","phone":"+1234567890","message":"test"}'
+# 重新登录
+logout
 ```
 
-### Q4: 如何修改执行时间
+### Q3: 模组无响应
+
+```bash
+# 使用 minicom 手动测试
+sudo minicom -D /dev/ttyUSB0 -b 115200
+
+# 输入 AT 命令
+AT
+ATI
+AT+CSQ
+```
+
+### Q4: 短信发送失败
+
+```bash
+# 查看详细日志
+cardpulse --test
+
+# 检查 SIM 卡状态
+cardpulse --info
+
+# 检查信号强度
+cardpulse --info | grep "信号强度"
+```
+
+### Q5: 如何修改执行时间
 
 **cron 方式：**
 ```bash
@@ -357,17 +364,20 @@ sudo systemctl daemon-reload
 sudo systemctl restart cardpulse.timer
 ```
 
-### Q5: 如何查看历史执行记录
+### Q6: 如何查看历史记录
 
 ```bash
+# 查看状态
+cardpulse --status
+
 # 查看日志
 cat ~/.cardpulse/logs/cardpulse.log
 
-# 查看上次成功时间
-date -d @$(cat ~/.cardpulse/state/last_success)
+# 查看历史记录
+cat ~/.cardpulse/state/history.log
 ```
 
-### Q6: 如何卸载
+### Q7: 如何卸载
 
 ```bash
 # 停止定时器
@@ -376,6 +386,7 @@ sudo systemctl disable cardpulse.timer
 
 # 删除文件
 sudo rm /usr/local/bin/cardpulse
+sudo rm -rf /opt/cardpulse
 sudo rm /etc/systemd/system/cardpulse.{service,timer}
 sudo systemctl daemon-reload
 
@@ -395,11 +406,11 @@ rm -rf ~/.cardpulse
 
 **建议：**
 - 保号间隔设置为 179 天，留有余量
-- 同时发送多条短信更保险
 - 保持设备 24 小时运行
+- 定期检查日志确保正常运行
 
 ---
 
 ## 获取帮助
 
-- GitHub Issues: https://github.com/cardpulse/cardpulse/issues
+- GitHub Issues: https://github.com/henrydontbbai/CardPulse/issues
