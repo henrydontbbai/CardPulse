@@ -1,0 +1,15 @@
+[Unit]
+Description=CardPulse 定时器 - 每天凌晨 2 点执行保号检查
+
+[Timer]
+# 每天凌晨 2 点执行
+OnCalendar=*-*-* 02:00:00
+
+# 如果错过了执行时间（例如关机），在启动后立即执行
+Persistent=true
+
+# 随机延迟 0-30 分钟，避免同时大量请求
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
