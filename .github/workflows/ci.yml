@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run ShellCheck
+        run: shellcheck bin/cardpulse lib/*.sh scripts/install.sh
+
+  smoke-test:
+    name: Installed CLI Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install runtime layout
+        run: |
+          sudo install -d -o root -g root -m 0755 /opt/cardpulse/lib /usr/local/bin /usr/local/lib
+          sudo install -o root -g root -m 0755 bin/cardpulse /usr/local/bin/cardpulse
+          sudo install -o root -g root -m 0755 lib/*.sh /opt/cardpulse/lib/
+          sudo install -o root -g root -m 0644 lib/pdu_encoder.py /opt/cardpulse/lib/pdu_encoder.py
+          sudo ln -sfn /opt/cardpulse/lib /usr/local/lib/cardpulse
+      - name: Run installed CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/cardpulse-config"
+          cp config/config.example.yaml "$RUNNER_TEMP/cardpulse-config/config.yaml"
+          CARDPULSE_CONFIG_DIR="$RUNNER_TEMP/cardpulse-config" /usr/local/bin/cardpulse --status
+      - name: Verify installed PDU helper path
+        run: |
+          CARDPULSE_LIB_DIR=/opt/cardpulse/lib bash -c 'source /opt/cardpulse/lib/at_modem.sh; test "$(at_resolve_pdu_encoder)" = "/opt/cardpulse/lib/pdu_encoder.py"'
+          CARDPULSE_LIB_DIR=/opt/cardpulse/lib python3 /opt/cardpulse/lib/pdu_encoder.py "+8613800138000" "hello" | grep -q '05E8329BFD06'
+
+  local-tests:
+    name: Local Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml shellcheck
+      - name: Run local tests
+        run: bash tests/run.sh
+      - name: Run ShellCheck directly
+        run: shellcheck bin/cardpulse lib/*.sh scripts/install.sh
+
+  python-quality:
+    name: Python Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Ruff
+        run: python3 -m pip install --user ruff==0.5.7
+      - name: Run Ruff
+        run: ~/.local/bin/ruff check lib/pdu_encoder.py tests/*.py
+
+  pdu-encode-test:
+    name: PDU Encoding Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Test known GSM 7-bit vector
+        run: |
+          python3 - <<'PY'
+          from lib.pdu_encoder import build_pdu
+          pdu, err = build_pdu('+8613800138000', 'hello')
+          assert err is None, err
+          assert pdu.endswith('05E8329BFD06'), pdu
+          PY
+      - name: Test ASCII encoding
+        run: python3 lib/pdu_encoder.py "+8613800138000" "Hello World" | grep -q '^[0-9A-F]\+ [0-9]\+$'
+      - name: Test UCS2 encoding (Chinese)
+        run: python3 lib/pdu_encoder.py "+8613800138000" "你好" | grep -q '08A7044F60597D'
+      - name: Test GSM 7-bit extended chars
+        run: python3 lib/pdu_encoder.py "+8613800138000" '{}[]~|€' | grep -q '00A70E'
+      - name: Test GSM 7-bit overlength rejection
+        run: python3 lib/pdu_encoder.py "+8613800138000" "$(printf 'a%.0s' {1..161})" 2>&1 && exit 1 || exit 0
+      - name: Test UCS2 overlength rejection
+        run: python3 lib/pdu_encoder.py "+8613800138000" "$(printf '你%.0s' {1..71})" 2>&1 && exit 1 || exit 0
+      - name: Test invalid phone number (too short)
+        run: python3 lib/pdu_encoder.py "1234" "test" 2>&1 && exit 1 || exit 0
+      - name: Test empty message
+        run: python3 lib/pdu_encoder.py "+8613800138000" "" 2>&1 && exit 1 || exit 0
+
+  yaml-validate:
+    name: YAML Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install PyYAML
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
+      - name: Validate config example
+        run: python3 tests/validate_config_schema.py
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build image
+        run: docker build -t cardpulse:test .
+      - name: Run image smoke tests
+        run: |
+          docker run --rm cardpulse:test --version
+          docker run --rm cardpulse:test --status
+          docker run --rm --entrypoint id cardpulse:test
+
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [shellcheck, smoke-test, local-tests, python-quality, pdu-encode-test, yaml-validate, docker-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Generate release notes
+        run: |
+          export TAG="${GITHUB_REF_NAME#v}"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = rf"(^## \[{re.escape(tag)}\].*?)(?=^---\n\n## \[|\Z)"
+          match = re.search(pattern, changelog, re.S | re.M)
+          if not match:
+              raise SystemExit(f"CHANGELOG section for {tag} not found")
+          Path("release-notes.md").write_text("# CardPulse Release\n\n" + match.group(1).strip() + "\n", encoding="utf-8")
+          PY
+      - name: Create Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          body_path: release-notes.md
+          generate_release_notes: false

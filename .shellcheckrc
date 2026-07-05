@@ -1,0 +1,4 @@
+# ShellCheck 配置文件
+# 启用所有警告级别
+external-sources=true
+disable=SC1090,SC2016

@@ -28,9 +28,14 @@
    # 确保脚本可执行
    chmod +x bin/cardpulse lib/*.sh
    
-   # 测试基本功能
-   cardpulse --help
-   cardpulse --version
+   # 安装测试依赖（Debian/Ubuntu）
+   sudo apt-get install -y python3-yaml shellcheck
+
+   # 运行本地测试
+   bash tests/run.sh
+
+   # 运行 ShellCheck
+   shellcheck bin/cardpulse lib/*.sh scripts/install.sh
    ```
 5. **提交更改**
    ```bash
@@ -78,6 +83,7 @@ git commit -m "docs: 更新安装指南"
 - 使用有意义的函数名和变量名
 - 添加必要的注释
 - 避免硬编码敏感信息
+- 提交前确认 `bash tests/run.sh` 和 ShellCheck 通过
 
 ## 功能建议
 

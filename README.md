@@ -14,13 +14,14 @@ CardPulse 是一个轻量级的 SIM 卡保活工具，通过 AT 命令直接控�
 ## 功能特性
 
 - **完全独立**：无需任何外部服务，直接通过串口控制 4G 模组
-- **TEXT + PDU 模式**：支持英文和中文短信
+- **PDU 短信编码**：默认使用 PDU 模式，支持英文、中文和 GSM 扩展字符
 - **定时保号**：按设定天数自动发送短信，保持 SIM 卡活跃
 - **智能调度**：仅在达到设定天数时发送，避免浪费
 - **状态持久化**：记录上次发送时间，重启后继续计时
 - **多渠道通知**：支持 Telegram、微信、企业微信、QQ、飞书、钉钉、Bark、Email
 - **自动检测**：自动发现串口设备，支持手动配置
 - **完善日志**：所有操作记录到日志文件，便于排查
+- **CI 与容器化**：提供 GitHub Actions、Dockerfile 和本地测试入口
 
 ## 硬件要求
 
@@ -77,14 +78,47 @@ cardpulse --status
 
 ### 4. 设置定时任务
 
-安装脚本已自动配置 cron 任务（每天凌晨 2 点执行）。
-
-也可以使用 systemd timer：
+安装脚本默认优先配置 systemd timer；如果 systemd 不可用，则回退到 cron（每天凌晨 2 点执行）。
 
 ```bash
 sudo systemctl start cardpulse.timer
 sudo systemctl status cardpulse.timer
 ```
+
+### Docker 使用
+
+```bash
+docker build -t cardpulse:local .
+docker run --rm \
+  --device /dev/ttyUSB0 \
+  --group-add "$(getent group dialout | cut -d: -f3)" \
+  -v "$HOME/.cardpulse:/home/cardpulse/.cardpulse" \
+  cardpulse:local --status
+```
+
+容器默认使用非 root 用户 `cardpulse` 运行。实际发送短信时需要通过 `--device` 暴露串口设备，并挂载包含 `config.yaml` 的配置目录。若宿主机串口属于 `dialout` 组，建议用 `--group-add` 传入宿主机上的 `dialout` GID。
+
+当前版本默认走单条 PDU 短信，不做长短信拆分；GSM 7-bit 最多 160 septets，UCS2 最多 140 octets。
+
+### macOS 真机测试
+
+macOS 可用于连接 4G 模组做 AT/PDU 真机验证，但不作为生产安装目标。建议先安装依赖：
+
+```bash
+brew install bash coreutils shellcheck python
+python3 -m pip install pyyaml
+```
+
+常见串口为 `/dev/cu.usbserial*`、`/dev/cu.usbmodem*`、`/dev/cu.wchusbserial*` 或 `/dev/cu.SLAB_USBtoUART*`。配置时建议关闭自动检测并写入实际端口：
+
+```yaml
+serial:
+  port: "/dev/cu.usbserial-XXXX"
+  baudrate: 115200
+  auto_detect: false
+```
+
+Linux 安装器、systemd、logrotate 和生产调度仍以 Linux 环境验证为准。
 
 ## 命令行选项
 
@@ -99,6 +133,7 @@ sudo systemctl status cardpulse.timer
   -i, --info           显示模组信息
   -r, --reset          重置状态（重新开始计时）
   -n, --notify         测试通知功能
+  --notify-channel CH  测试指定通知渠道
   -v, --version        显示版本
   -h, --help           显示帮助
 ```
@@ -129,19 +164,30 @@ CardPulse/
 │   ├── at_modem.sh               # AT 命令通信
 │   ├── sms_sender.sh             # 短信发送
 │   ├── state_manager.sh          # 状态管理
-│   └── notifier.sh               # 通知推送
+│   ├── notifier.sh               # 通知推送
+│   └── pdu_encoder.py            # PDU 编码器
 ├── config/
 │   └── config.example.yaml       # 配置模板
 ├── scripts/
 │   ├── install.sh                # 安装脚本
 │   ├── cardpulse.service         # systemd 服务
 │   └── cardpulse.timer           # systemd 定时器
+├── tests/                        # 本地测试
 ├── DISCLAIMER.md                 # 法律声明
 ├── LICENSE                       # MIT 许可证
 └── README.md                     # 项目说明
 ```
 
 ## 常见问题
+
+### Q: 如何运行本地测试？
+
+```bash
+sudo apt-get install -y python3-yaml shellcheck
+bash tests/run.sh
+```
+
+`tests/run.sh` 会检查 Python 语法、版本一致性、配置 schema、PDU 编码和 Shell 语法。
 
 ### Q: 如何查看串口设备？
 

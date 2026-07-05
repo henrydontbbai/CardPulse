@@ -66,7 +66,7 @@ notify:
   # 创建方法: https://core.telegram.org/bots#how-do-i-create-a-bot
   telegram:
     enabled: false
-    bot_token: ""    # Bot Token (格式: 123456789:ABCdefGHIjklMNOpqr)
+    bot_token: ""    # Bot Token (示例: YOUR_TELEGRAM_BOT_TOKEN)
     chat_id: ""      # Chat ID (可通过 @userinfobot 获取)
   
   # 微信通知（Server酱）

@@ -13,11 +13,17 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 配置
-REPO_URL="https://github.com/henrydontbbai/CardPulse.git"
 INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="$HOME/.cardpulse"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+TARGET_USER="${SUDO_USER:-${USER:-root}}"
+TARGET_HOME="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6 || true)"
+[[ -z "$TARGET_HOME" ]] && TARGET_HOME="$HOME"
+CONFIG_DIR="${CARDPULSE_CONFIG_DIR:-$TARGET_HOME/.cardpulse}"
+LIB_DIR="/opt/cardpulse/lib"
+WANT_SYSTEMD=true
+WANT_CRON=auto
+SCHEDULER_SUMMARY="未配置"
 
 info() {
     echo -e "${GREEN}[INFO]${NC} $*"
@@ -32,6 +38,65 @@ error() {
     exit 1
 }
 
+shell_quote() {
+    local value="$1"
+    printf "'%s'" "${value//\'/\'\\\'\'}"
+}
+
+validate_generated_value() {
+    local label="$1"
+    local value="$2"
+
+    case "$value" in
+        *$'\n'*|*$'\r'*|*\%*|*\"*|*\'*)
+            error "$label 包含不支持的字符（换行、引号或 %）: $value"
+            ;;
+    esac
+}
+
+validate_install_inputs() {
+    validate_generated_value "TARGET_USER" "$TARGET_USER"
+    validate_generated_value "CONFIG_DIR" "$CONFIG_DIR"
+    validate_generated_value "LIB_DIR" "$LIB_DIR"
+    validate_generated_value "INSTALL_DIR" "$INSTALL_DIR"
+}
+
+show_usage() {
+    echo "用法: sudo ./scripts/install.sh [选项]"
+    echo ""
+    echo "选项:"
+    echo "  --no-systemd    不配置 systemd timer"
+    echo "  --no-cron       不配置 cron fallback"
+    echo "  --with-cron     即使 systemd 可用也额外配置 cron"
+    echo "  -h, --help      显示帮助"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-systemd)
+                WANT_SYSTEMD=false
+                shift
+                ;;
+            --no-cron)
+                WANT_CRON=false
+                shift
+                ;;
+            --with-cron)
+                WANT_CRON=true
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            *)
+                error "未知参数: $1"
+                ;;
+        esac
+    done
+}
+
 # 检查是否为 root 用户
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -42,28 +107,22 @@ check_root() {
 # 检查系统
 check_system() {
     info "检查系统环境..."
-    
+
     # 检查操作系统
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
-        info "检测到系统: $ID $VERSION_ID"
+        info "检测到系统: ${ID:-unknown} ${VERSION_ID:-}"
     else
         warn "无法检测操作系统类型"
     fi
-    
+
     # 检查架构
-    local arch=$(uname -m)
+    local arch
+    arch=$(uname -m)
     info "系统架构: $arch"
     
     case $arch in
-        x86_64|amd64)
-            ARCH="amd64"
-            ;;
-        aarch64|arm64)
-            ARCH="arm64"
-            ;;
-        armv7l|armhf)
-            ARCH="armv7"
+        x86_64|amd64|aarch64|arm64|armv7l|armhf)
             ;;
         *)
             warn "未知架构: $arch，继续安装"
@@ -76,7 +135,7 @@ install_deps() {
     info "检查依赖..."
     
     # 检查必要工具
-    local deps=("curl" "stty")
+    local deps=("curl" "stty" "timeout" "flock" "python3")
     local missing=()
     
     for dep in "${deps[@]}"; do
@@ -86,8 +145,8 @@ install_deps() {
     done
     
     # 检查 YAML 解析工具
-    if ! command -v yq &> /dev/null && ! command -v python3 &> /dev/null; then
-        missing+=("yq 或 python3")
+    if ! command -v yq &> /dev/null && ! python3 -c 'import yaml' >/dev/null 2>&1; then
+        missing+=("yq 或 python3-yaml")
     fi
     
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -96,13 +155,13 @@ install_deps() {
         
         if command -v apt-get &> /dev/null; then
             apt-get update
-            apt-get install -y curl python3 python3-yaml
+            apt-get install -y curl python3 python3-yaml coreutils util-linux
         elif command -v yum &> /dev/null; then
-            yum install -y curl python3 python3-pyyaml
+            yum install -y curl python3 python3-pyyaml coreutils util-linux
         elif command -v dnf &> /dev/null; then
-            dnf install -y curl python3 python3-pyyaml
+            dnf install -y curl python3 python3-pyyaml coreutils util-linux
         elif command -v pacman &> /dev/null; then
-            pacman -S --noconfirm curl python python-yaml
+            pacman -S --noconfirm curl python python-yaml coreutils util-linux
         else
             warn "无法自动安装依赖，请手动安装: curl, python3, python3-yaml"
         fi
@@ -116,19 +175,20 @@ install_cardpulse() {
     info "安装 CardPulse..."
     
     # 创建安装目录
-    mkdir -p "$INSTALL_DIR"
+    install -d -o root -g root -m 0755 "$INSTALL_DIR" "$LIB_DIR"
     
     # 复制文件
-    cp "$PROJECT_DIR/bin/cardpulse" "$INSTALL_DIR/cardpulse"
-    chmod +x "$INSTALL_DIR/cardpulse"
+    install -o root -g root -m 0755 "$PROJECT_DIR/bin/cardpulse" "$INSTALL_DIR/cardpulse"
     
     # 复制库文件
-    mkdir -p "/opt/cardpulse/lib"
-    cp "$PROJECT_DIR/lib/"*.sh "/opt/cardpulse/lib/"
-    chmod +x /opt/cardpulse/lib/*.sh
+    install -o root -g root -m 0755 "$PROJECT_DIR/lib/"*.sh "$LIB_DIR/"
+    # 复制 PDU 编码器
+    if [[ -f "$PROJECT_DIR/lib/pdu_encoder.py" ]]; then
+        install -o root -g root -m 0644 "$PROJECT_DIR/lib/pdu_encoder.py" "$LIB_DIR/pdu_encoder.py"
+    fi
     
     # 创建符号链接
-    ln -sf /opt/cardpulse/lib /usr/local/lib/cardpulse
+    ln -sf "$LIB_DIR" /usr/local/lib/cardpulse
     
     info "CardPulse 已安装到 $INSTALL_DIR/cardpulse"
     info "库文件已安装到 /opt/cardpulse/lib/"
@@ -138,9 +198,7 @@ install_cardpulse() {
 setup_config() {
     info "设置配置目录..."
     
-    mkdir -p "$CONFIG_DIR"
-    mkdir -p "$CONFIG_DIR/state"
-    mkdir -p "$CONFIG_DIR/logs"
+    mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/state" "$CONFIG_DIR/logs"
     
     if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
         info "创建配置文件..."
@@ -151,6 +209,16 @@ setup_config() {
     else
         info "配置文件已存在，跳过创建"
     fi
+
+    local target_group
+    target_group=$(id -gn "$TARGET_USER" 2>/dev/null || true)
+    if [[ -n "$target_group" ]]; then
+        chown -R "$TARGET_USER:$target_group" "$CONFIG_DIR"
+    else
+        chown -R "$TARGET_USER" "$CONFIG_DIR"
+    fi
+    chmod 700 "$CONFIG_DIR" "$CONFIG_DIR/state" "$CONFIG_DIR/logs"
+    chmod 600 "$CONFIG_DIR/config.yaml" 2>/dev/null || true
 }
 
 # 设置串口权限
@@ -158,8 +226,14 @@ setup_permissions() {
     info "设置串口权限..."
     
     # 将当前用户添加到 dialout 组
-    local current_user="${SUDO_USER:-$USER}"
+    local current_user="$TARGET_USER"
     
+    if ! getent group dialout >/dev/null 2>&1; then
+        warn "系统不存在 dialout 组，跳过自动串口权限设置"
+        warn "请根据发行版手动授予 $current_user 访问串口设备的权限"
+        return
+    fi
+
     if id -nG "$current_user" | grep -q "dialout"; then
         info "用户 $current_user 已在 dialout 组中"
     else
@@ -180,16 +254,26 @@ setup_cron() {
     fi
     
     # 添加 cron 任务（每天凌晨 2 点执行）
-    (crontab -l 2>/dev/null; echo "0 2 * * * $INSTALL_DIR/cardpulse >> $CONFIG_DIR/logs/cardpulse.log 2>&1") | crontab -
+    local cron_command
+    local cron_line
+    cron_command="CARDPULSE_CONFIG_DIR=$(shell_quote "$CONFIG_DIR") CARDPULSE_LIB_DIR=$(shell_quote "$LIB_DIR") $(shell_quote "$INSTALL_DIR/cardpulse") >> $(shell_quote "$CONFIG_DIR/logs/cardpulse.log") 2>&1"
+    cron_line="0 2 * * * su -s /bin/sh -c $(shell_quote "$cron_command") $(shell_quote "$TARGET_USER")"
+    (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
     
     info "已添加 cron 任务：每天凌晨 2 点执行保号检查"
 }
 
+systemd_usable() {
+    [[ -d /etc/systemd/system ]] || return 1
+    command -v systemctl >/dev/null 2>&1 || return 1
+    [[ -d /run/systemd/system ]] || return 1
+}
+
 # 创建 systemd 服务（可选）
 setup_systemd() {
-    if [[ ! -d /etc/systemd/system ]]; then
+    if ! systemd_usable; then
         info "系统不支持 systemd，跳过服务创建"
-        return
+        return 1
     fi
     
     info "创建 systemd 服务..."
@@ -201,9 +285,11 @@ After=network.target
 
 [Service]
 Type=oneshot
-User=$SUDO_USER
+User=$TARGET_USER
+Environment="CARDPULSE_CONFIG_DIR=$CONFIG_DIR"
+Environment="CARDPULSE_LIB_DIR=$LIB_DIR"
 ExecStart=$INSTALL_DIR/cardpulse
-WorkingDirectory=$CONFIG_DIR
+WorkingDirectory="$CONFIG_DIR"
 
 [Install]
 WantedBy=multi-user.target
@@ -215,6 +301,7 @@ Description=CardPulse 定时器
 
 [Timer]
 OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=1800
 Persistent=true
 
 [Install]
@@ -229,6 +316,64 @@ EOF
     echo "  启动定时器: sudo systemctl start cardpulse.timer"
     echo "  查看状态:   sudo systemctl status cardpulse.timer"
     echo "  手动执行:   sudo systemctl start cardpulse.service"
+}
+
+setup_scheduler() {
+    local systemd_ok=false
+    if systemd_usable; then
+        systemd_ok=true
+    fi
+
+    if [[ "$WANT_SYSTEMD" == "true" && "$systemd_ok" == "true" ]]; then
+        setup_systemd
+        SCHEDULER_SUMMARY="systemd timer"
+        if [[ "$WANT_CRON" == "true" ]]; then
+            setup_cron
+            SCHEDULER_SUMMARY="systemd timer + cron"
+        fi
+        return 0
+    fi
+
+    if [[ "$WANT_SYSTEMD" == "true" && "$systemd_ok" != "true" ]]; then
+        warn "systemd 不可用，将尝试 cron fallback"
+    fi
+
+    if [[ "$WANT_CRON" != "false" ]]; then
+        setup_cron
+        SCHEDULER_SUMMARY="cron"
+        return 0
+    fi
+
+    warn "未配置自动调度器；请手动运行 cardpulse 或自行配置定时任务"
+    SCHEDULER_SUMMARY="未配置"
+}
+
+# 配置日志轮转
+setup_logrotate() {
+    if [[ ! -f /etc/logrotate.conf ]]; then
+        info "未检测到 logrotate，跳过日志轮转配置"
+        return
+    fi
+
+    local logrotate_conf="/etc/logrotate.d/cardpulse"
+    if [[ -f "$logrotate_conf" ]]; then
+        info "日志轮转配置已存在，跳过"
+        return
+    fi
+
+    info "配置日志轮转..."
+    cat > "$logrotate_conf" << EOF
+"$CONFIG_DIR/logs/cardpulse.log" {
+    monthly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+    info "✓ 日志轮转配置已创建: $logrotate_conf"
 }
 
 # 显示安装信息
@@ -248,7 +393,10 @@ show_info() {
     echo "  3. 测试发送: cardpulse --test"
     echo "  4. 查看状态: cardpulse --status"
     echo ""
-    echo "定时任务已配置，将在每天凌晨 2 点自动执行。"
+    echo "定时任务: $SCHEDULER_SUMMARY"
+    if [[ "$SCHEDULER_SUMMARY" != "未配置" ]]; then
+        echo "定时任务已配置，将在每天凌晨 2 点自动执行。"
+    fi
     echo ""
     echo "如需帮助，请查看 README.md"
     echo ""
@@ -258,15 +406,17 @@ show_info() {
 main() {
     echo -e "${BLUE}CardPulse 安装程序${NC}"
     echo ""
-    
+
+    parse_args "$@"
     check_root
     check_system
+    validate_install_inputs
     install_deps
     install_cardpulse
     setup_config
     setup_permissions
-    setup_cron
-    setup_systemd
+    setup_scheduler
+    setup_logrotate
     show_info
 }
 

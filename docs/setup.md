@@ -107,20 +107,20 @@ sudo ./scripts/install.sh
 2. 复制文件到系统目录
 3. 创建配置目录
 4. 设置串口权限
-5. 配置 cron 定时任务
-6. 创建 systemd 服务
+5. 配置定时任务（优先 systemd，必要时回退 cron）
+6. 配置日志轮转
 
 ### 3.3 手动安装（可选）
 
 ```bash
 # 复制可执行文件
-sudo cp bin/cardpulse /usr/local/bin/
-sudo chmod +x /usr/local/bin/cardpulse
+sudo install -o root -g root -m 0755 bin/cardpulse /usr/local/bin/cardpulse
 
 # 复制库文件
-sudo mkdir -p /opt/cardpulse/lib
-sudo cp lib/*.sh /opt/cardpulse/lib/
-sudo chmod +x /opt/cardpulse/lib/*.sh
+sudo install -d -o root -g root -m 0755 /opt/cardpulse/lib
+sudo install -o root -g root -m 0755 lib/*.sh /opt/cardpulse/lib/
+sudo install -o root -g root -m 0644 lib/pdu_encoder.py /opt/cardpulse/lib/pdu_encoder.py
+sudo ln -sfn /opt/cardpulse/lib /usr/local/lib/cardpulse
 
 # 创建配置目录
 mkdir -p ~/.cardpulse/{state,logs}
@@ -161,6 +161,32 @@ ls /dev/ttyUSB* /dev/ttyACM*
 dmesg | grep tty
 ```
 
+**macOS 真机测试：**
+
+macOS 可用于连接 4G 模组验证 AT 命令和真实短信发送，但不建议作为生产安装环境。先安装依赖：
+
+```bash
+brew install bash coreutils shellcheck python
+python3 -m pip install pyyaml
+```
+
+查找串口：
+
+```bash
+ls /dev/cu.* /dev/tty.*
+```
+
+常见端口包括 `/dev/cu.usbserial*`、`/dev/cu.usbmodem*`、`/dev/cu.wchusbserial*`、`/dev/cu.SLAB_USBtoUART*`。建议在配置中指定端口并关闭自动检测：
+
+```yaml
+serial:
+  port: "/dev/cu.usbserial-XXXX"
+  baudrate: 115200
+  auto_detect: false
+```
+
+macOS 下 `timeout` 由 Homebrew `coreutils` 提供，命令名为 `gtimeout`；CardPulse 会自动使用 `timeout` 或 `gtimeout`。
+
 ### 4.3 短信配置
 
 ```yaml
@@ -178,6 +204,8 @@ sms:
   timeout: 30
 ```
 
+当前版本默认使用单条 PDU 短信，不做长短信拆分。GSM 7-bit 最多 160 septets，UCS2 最多 140 octets；超长内容会在发送前被拒绝。
+
 ### 4.4 通知配置（可选）
 
 ```yaml
@@ -187,8 +215,8 @@ notify:
   # Telegram
   telegram:
     enabled: true
-    bot_token: "123456789:ABCdefGHIjklMNOpqr"
-    chat_id: "123456789"
+    bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+    chat_id: "YOUR_TELEGRAM_CHAT_ID"
   
   # 微信（Server酱）
   wechat:
@@ -262,24 +290,44 @@ cardpulse --test
 cardpulse --force
 ```
 
+### 5.5 开发者本地测试
+
+```bash
+sudo apt-get install -y python3-yaml shellcheck
+bash tests/run.sh
+shellcheck bin/cardpulse lib/*.sh scripts/install.sh
+```
+
 ---
 
 ## 6. 定时任务
 
-### 6.1 使用 cron（已自动配置）
+### 6.1 自动调度策略
 
-安装脚本已自动添加 cron 任务：
+安装脚本默认优先配置 systemd timer；如果 systemd 不可用，则回退到 cron。可用参数：
+
+```bash
+sudo ./scripts/install.sh --no-cron       # 仅使用 systemd，systemd 不可用时不配置调度器
+sudo ./scripts/install.sh --no-systemd    # 禁用 systemd，使用 cron
+sudo ./scripts/install.sh --with-cron     # systemd 可用时仍额外配置 cron
+```
+
+一般不建议同时启用 systemd 和 cron，除非你明确需要双调度兜底。
+
+### 6.2 使用 cron
+
+如果 systemd 不可用或使用 `--no-systemd`，安装脚本会添加 cron 任务：
 
 ```bash
 # 查看 cron 任务
 crontab -l
 
-# 手动添加（如果需要）
+# 手动添加（如果需要，替换用户名和路径）
 crontab -e
-# 添加：0 2 * * * /usr/local/bin/cardpulse >> ~/.cardpulse/logs/cardpulse.log 2>&1
+# 添加：0 2 * * * su -s /bin/sh -c 'CARDPULSE_CONFIG_DIR=/home/YOUR_USER/.cardpulse CARDPULSE_LIB_DIR=/opt/cardpulse/lib /usr/local/bin/cardpulse >> /home/YOUR_USER/.cardpulse/logs/cardpulse.log 2>&1' YOUR_USER
 ```
 
-### 6.2 使用 systemd timer（推荐）
+### 6.3 使用 systemd timer（推荐）
 
 ```bash
 # 启动定时器

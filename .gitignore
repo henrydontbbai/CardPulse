@@ -5,6 +5,10 @@
 # 配置文件（包含敏感信息）
 config.yaml
 *.local
+.env
+.env.*
+*.pem
+*.key
 
 # 运行时生成的文件
 state/
@@ -16,6 +20,7 @@ tmp/
 temp/
 *.tmp
 *.temp
+*.pid
 
 # 系统文件
 .DS_Store
@@ -27,11 +32,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
-
-# 日志文件
-*.log
-logs/
+__pycache__/
+*.pyc
 
 # 二进制文件
-cardpulse
+/cardpulse
 *.exe

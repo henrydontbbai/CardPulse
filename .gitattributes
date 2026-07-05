@@ -1,0 +1,14 @@
+*.sh text eol=lf
+bin/cardpulse text eol=lf
+scripts/install.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf
+.dockerignore text eol=lf
+.shellcheckrc text eol=lf
+Dockerfile text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+LICENSE text eol=lf
