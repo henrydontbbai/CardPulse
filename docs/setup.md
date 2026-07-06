@@ -230,7 +230,15 @@ notify:
 
 ## 5. 测试验证
 
-### 5.1 查看模组信息
+### 5.1 安全硬件诊断
+
+```bash
+cardpulse --doctor
+```
+
+只有 `--doctor` 报告 `AT: OK` 后，才继续查看模组信息或测试发送。
+
+### 5.2 查看模组信息
 
 ```bash
 cardpulse --info
@@ -254,13 +262,14 @@ SIM 卡: READY
 运营商: CMCC
 ```
 
-### 5.2 测试发送
+### 5.3 测试发送
 
 ```bash
-cardpulse --test
+# 真实短信测试：仅在确认授权后执行
+# cardpulse --test
 ```
 
-### 5.3 查看状态
+### 5.4 查看状态
 
 ```bash
 cardpulse --status

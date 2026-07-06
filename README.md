@@ -66,11 +66,14 @@ sms:
 ### 3. 验证
 
 ```bash
+# 先做安全硬件诊断（不发短信、不写状态）
+cardpulse --doctor
+
 # 查看模组信息
 cardpulse --info
 
-# 测试发送
-cardpulse --test
+# 真实短信测试：仅在确认授权后执行
+# cardpulse --test
 
 # 查看状态
 cardpulse --status
