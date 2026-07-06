@@ -64,7 +64,7 @@ notify_send() {
 
     local enabled
     enabled=$(config_read ".notify.enabled" "false")
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -98,7 +98,7 @@ notify_telegram() {
     local enabled
     enabled=$(config_read ".notify.telegram.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -138,7 +138,7 @@ notify_wechat() {
     local enabled
     enabled=$(config_read ".notify.wechat.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -175,7 +175,7 @@ notify_wecom() {
     local enabled
     enabled=$(config_read ".notify.wecom.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -218,7 +218,7 @@ notify_qq() {
     local enabled
     enabled=$(config_read ".notify.qq.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -254,7 +254,7 @@ notify_feishu() {
     local enabled
     enabled=$(config_read ".notify.feishu.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -297,7 +297,7 @@ notify_dingtalk() {
     local enabled
     enabled=$(config_read ".notify.dingtalk.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -370,7 +370,7 @@ notify_bark() {
     local enabled
     enabled=$(config_read ".notify.bark.enabled" "false")
 
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -416,7 +416,7 @@ notify_email() {
 
     local enabled
     enabled=$(config_read ".notify.email.enabled" "false")
-    if [[ "$enabled" != "true" ]]; then
+    if ! config_is_true "$enabled"; then
         return 0
     fi
 
@@ -457,7 +457,7 @@ notify_email() {
 
     local smtp_scheme="smtp"
     local ssl_args=()
-    if [[ "$use_ssl" == "true" ]]; then
+    if config_is_true "$use_ssl"; then
         smtp_scheme="smtps"
         ssl_args+=(--ssl-reqd)
     fi

@@ -134,6 +134,7 @@ Linux 安装器、systemd、logrotate 和生产调度仍以 Linux 环境验证�
   -r, --reset          重置状态（重新开始计时）
   -n, --notify         测试通知功能
   --notify-channel CH  测试指定通知渠道
+  --doctor             运行硬件诊断；不发送短信、不写入状态
   -v, --version        显示版本
   -h, --help           显示帮助
 ```
@@ -230,6 +231,22 @@ Google Voice 要求每 **180 天**至少有一次活动。CardPulse 默认设置
 本工具仅供个人学习与技术研究使用。使用本工具自动化发送短信可能违反 Google Voice 服务条款，导致号码被回收或帐户被封禁。**使用风险由使用者自行承担。**
 
 详见 [DISCLAIMER.md](DISCLAIMER.md)。
+
+## 硬件诊断与 macOS 测试
+
+使用 `--info` 或发送短信前，先确认 4G 模块暴露了 AT 串口。系统能看到 USB 设备不等于 CardPulse 能使用。
+
+```bash
+cardpulse --doctor
+```
+
+`--doctor` 不会发送短信，也不会写入 CardPulse 状态。如果存在 AT 串口，它会发送 `AT` 等查询命令确认模块是否返回 `OK`。
+
+在 macOS 上，先找 `/dev/cu.usbserial*` 或 `/dev/cu.usbmodem*`。如果 DJI/Baiwang `2CA3:4006` 只出现在 USB 列表里，但没有 AT 串口，CardPulse 还不能直接使用它。
+
+在 Linux 上，`--doctor` 还会报告 `/dev/cdc-wdm*` 这类 MBIM/QMI 控制口。这能解释为什么 VoHive 这类工具可能可用，但不代表 CardPulse 的 AT 串口路径已经就绪。详见 `docs/hardware-diagnostics.md`。
+
+Apple Silicon Mac 可以用 Ubuntu ARM64 虚拟机加 USB 直通验证 DJI 模块；如果 VM 内出现 MBIM/QMI 控制口，再构建 VoHive `linux_arm64` 做只读发现。不要运行现有 `linux_amd64` 二进制，也不要在未授权时发送真实短信。
 
 ## License
 

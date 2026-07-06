@@ -23,13 +23,15 @@ sms_detect_device() {
     fi
     
     # 自动检测
-    if [[ "$auto_detect" == "true" ]]; then
-        local detected
-        detected=$(at_detect_device) || detected=""
-        if [[ -n "$detected" ]]; then
-            echo "$detected"
-            return 0
-        fi
+    if ! config_is_true "$auto_detect"; then
+        return 1
+    fi
+
+    local detected
+    detected=$(at_detect_device) || detected=""
+    if [[ -n "$detected" ]]; then
+        echo "$detected"
+        return 0
     fi
     
     return 1

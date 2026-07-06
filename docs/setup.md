@@ -462,3 +462,23 @@ rm -rf ~/.cardpulse
 ## 获取帮助
 
 - GitHub Issues: https://github.com/henrydontbbai/CardPulse/issues
+
+## 短信测试前的硬件诊断
+
+CardPulse 需要 AT 串口。操作系统能列出 USB 设备还不够。
+
+安全顺序：
+
+```bash
+cardpulse --doctor
+cardpulse --info
+# cardpulse --test only after you intentionally approve a real SMS send
+```
+
+`cardpulse --doctor` 不会发送短信，也不会写入 CardPulse 状态。如果存在 AT 串口，它可能会发送 AT 查询命令。如果结果是 `No AT serial port found`，先不要运行 `--info` 或 `--test`。
+
+在 macOS 上，先找 `/dev/cu.usbserial*`、`/dev/cu.usbmodem*`、`/dev/cu.wchusbserial*` 或 `/dev/cu.SLAB_USBtoUART*`。DJI/Baiwang `2CA3:4006` 如果只出现在 USB 列表里，只能说明系统看到了设备；必须同时出现 AT 串口并对 `AT` 返回 `OK`，CardPulse 才能使用。
+
+如果要测试 VoHive/MBIM/QMI 路线，建议在 Apple Silicon Mac 上使用 Ubuntu ARM64 虚拟机并做 USB 直通；先只做 `/dev/cdc-wdm*`、`/dev/wwan*` 和驱动绑定检查，不要直接发短信。
+
+详细清单见 `docs/hardware-diagnostics.md`。

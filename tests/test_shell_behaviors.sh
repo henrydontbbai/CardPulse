@@ -22,13 +22,172 @@ expect_failure_contains() {
     fi
 }
 
-expect_failure_contains "需要参数" bash bin/cardpulse --config
-expect_failure_contains "需要参数" bash bin/cardpulse --notify-channel
-expect_failure_contains "未知通知渠道" bash bin/cardpulse --notify --notify-channel invalid
-expect_failure_contains "--notify-channel 需要与 --notify 一起使用" bash bin/cardpulse --notify-channel telegram
+expect_failure_contains "requires an argument" bash bin/cardpulse --config
+expect_failure_contains "requires an argument" bash bin/cardpulse --notify-channel
+expect_failure_contains "Unknown notification channel" bash bin/cardpulse --notify --notify-channel invalid
+expect_failure_contains "--notify-channel requires --notify" bash bin/cardpulse --notify-channel telegram
+
+help_output=$(bash bin/cardpulse --help 2>&1)
+if [[ "$help_output" != *"--doctor"* ]]; then
+    fail "CLI help missing --doctor option"
+fi
+if [[ "$help_output" != *"will not send SMS or write CardPulse state"* ]]; then
+    fail "CLI help must state doctor will not send SMS"
+fi
+grep -q -- '--doctor' README.md || fail "README CLI options missing --doctor"
+grep -q 'Ubuntu ARM64' README.md || fail "README missing Apple Silicon Ubuntu ARM64 route"
+grep -q 'linux_arm64' README.md || fail "README missing VoHive linux_arm64 guidance"
+grep -q '未授权时发送真实短信' README.md || fail "README missing no-unauthorized-SMS warning"
+
+doctor_config_dir=$(mktemp -d)
+doctor_bin_dir=$(mktemp -d)
+trap 'rm -rf "$doctor_config_dir" "$doctor_bin_dir"' EXIT
+
+cat > "$doctor_config_dir/config.yaml" <<'YAML'
+serial:
+  port: "/tmp/cardpulse-doctor-missing-tty"
+  baudrate: 115200
+  auto_detect: false
+sms:
+  phone: "+8613800138000"
+  message: "doctor check"
+  interval_days: 179
+  timeout: 30
+retry:
+  max_attempts: 1
+  interval: 1
+notify:
+  enabled: false
+logging:
+  level: "INFO"
+  file: "logs/cardpulse.log"
+YAML
+
+cat > "$doctor_bin_dir/yq" <<'SH'
+#!/bin/sh
+key="$2"
+case "$key" in
+  .serial.port) echo "/tmp/cardpulse-doctor-missing-tty" ;;
+  .serial.baudrate) echo "115200" ;;
+  .serial.auto_detect) echo "false" ;;
+  *) echo "" ;;
+esac
+SH
+chmod +x "$doctor_bin_dir/yq"
+
+doctor_output=$(PATH="$doctor_bin_dir:$PATH" CARDPULSE_CONFIG_DIR="$doctor_config_dir" bash bin/cardpulse --doctor 2>&1 || true)
+if [[ "$doctor_output" != *"CardPulse doctor"* ]]; then
+    echo "$doctor_output" >&2
+    fail "doctor output missing diagnostic header"
+fi
+if [[ "$doctor_output" != *"will not send SMS"* ]]; then
+    echo "$doctor_output" >&2
+    fail "doctor output must state it will not send SMS"
+fi
+if [[ "$doctor_output" != *"AT query commands"* ]]; then
+    echo "$doctor_output" >&2
+    fail "doctor output must disclose AT query commands"
+fi
+if [[ "$doctor_output" != *"No AT serial port found"* ]]; then
+    echo "$doctor_output" >&2
+    fail "doctor output missing no-serial explanation"
+fi
+if [[ -e "$doctor_config_dir/state" || -e "$doctor_config_dir/state/cardpulse.lock" || -e "$doctor_config_dir/.cardpulse.lock" ]]; then
+    fail "doctor must not create state or lock files"
+fi
+
+missing_config_dir=$(mktemp -d)
+missing_config_output=$(PATH="$doctor_bin_dir:$PATH" CARDPULSE_CONFIG_DIR="$missing_config_dir" bash bin/cardpulse --doctor 2>&1 || true)
+if [[ "$missing_config_output" != *"Serial candidates:"* || "$missing_config_output" != *"Linux MBIM/QMI candidates:"* || "$missing_config_output" != *"USB hints:"* ]]; then
+    echo "$missing_config_output" >&2
+    fail "doctor should print hardware diagnostics even when config is missing"
+fi
+if [[ "$missing_config_output" != *"Config: unavailable"* ]]; then
+    echo "$missing_config_output" >&2
+    fail "doctor should report missing config separately"
+fi
+
+config_validate_output=$(
+    source lib/config_reader.sh
+    CONFIG_FILE="$doctor_config_dir/config.yaml"
+    config_read() {
+        case "$1" in
+          .serial.port) echo "" ;;
+          .serial.auto_detect) echo "True" ;;
+          .serial.baudrate) echo "115200" ;;
+          .sms.phone) echo "+8613800138000" ;;
+          .sms.interval_days) echo "179" ;;
+          .sms.timeout) echo "30" ;;
+          .retry.max_attempts) echo "1" ;;
+          .retry.interval) echo "1" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    config_validate 2>&1
+)
+if [[ "$config_validate_output" == *"serial.port"* ]]; then
+    echo "$config_validate_output" >&2
+    fail "config_validate should accept Python YAML boolean True for serial.auto_detect"
+fi
+
+notify_validate_output=$(
+    source lib/config_reader.sh
+    CONFIG_FILE="$doctor_config_dir/config.yaml"
+    config_read() {
+        case "$1" in
+          .serial.port) echo "/tmp/cardpulse-doctor-missing-tty" ;;
+          .serial.auto_detect) echo "False" ;;
+          .serial.baudrate) echo "115200" ;;
+          .sms.phone) echo "+8613800138000" ;;
+          .sms.interval_days) echo "179" ;;
+          .sms.timeout) echo "30" ;;
+          .retry.max_attempts) echo "1" ;;
+          .retry.interval) echo "1" ;;
+          .notify.enabled) echo "True" ;;
+          .notify.telegram.enabled) echo "True" ;;
+          .notify.telegram.bot_token) echo "" ;;
+          .notify.telegram.chat_id) echo "" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    config_validate 2>&1 || true
+)
+if [[ "$notify_validate_output" != *"telegram.bot_token"* || "$notify_validate_output" != *"telegram.chat_id"* ]]; then
+    echo "$notify_validate_output" >&2
+    fail "config_validate should treat notification boolean True as enabled"
+fi
+
+wwan_root=$(mktemp -d)
+mkdir -p "$wwan_root/dev"
+: > "$wwan_root/dev/cdc-wdm0"
+: > "$wwan_root/dev/wwan0"
+wwan_test_output=$(PATH="$doctor_bin_dir:$PATH" CARDPULSE_CONFIG_DIR="$doctor_config_dir" CARDPULSE_DEV_ROOT="$wwan_root/dev" CARDPULSE_SYS_ROOT="$wwan_root/sys" bash bin/cardpulse --doctor 2>&1 || true)
+if [[ "$wwan_test_output" != *"Linux MBIM/QMI control candidate found"* ]]; then
+    echo "$wwan_test_output" >&2
+    fail "doctor should distinguish strong MBIM/QMI control candidates"
+fi
+
+auto_detect_output=$(
+    source lib/config_reader.sh
+    source lib/sms_sender.sh
+    config_read() {
+        if [[ "$1" == ".serial.auto_detect" ]]; then
+            echo "True"
+        else
+            echo ""
+        fi
+    }
+    at_detect_device() {
+        echo "/tmp/cardpulse-fake-serial"
+    }
+    sms_detect_device
+)
+if [[ "$auto_detect_output" != "/tmp/cardpulse-fake-serial" ]]; then
+    fail "sms_detect_device should accept Python YAML boolean True"
+fi
 
 grep -q 'acquire_singleton_lock' bin/cardpulse || fail "CLI missing singleton lock helper"
-grep -q '未找到 flock' bin/cardpulse || fail "CLI missing macOS flock fallback warning"
+grep -q 'flock not found' bin/cardpulse || fail "CLI missing macOS flock fallback warning"
 if grep -q 'rm -f "${CARDPULSE_LOCK_FILE}"' bin/cardpulse; then
     fail "CLI must not remove singleton lock file on exit"
 fi

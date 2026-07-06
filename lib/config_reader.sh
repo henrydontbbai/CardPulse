@@ -109,6 +109,13 @@ except Exception:
 }
 
 # 验证必要配置
+config_is_true() {
+    case "${1:-}" in
+        true|True|TRUE|1|yes|Yes|YES|on|On|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 config_validate() {
     local errors=0
 
@@ -118,7 +125,7 @@ config_validate() {
     serial_port=$(config_read ".serial.port" "")
     auto_detect=$(config_read ".serial.auto_detect" "true")
 
-    if [[ -z "$serial_port" && "$auto_detect" != "true" ]]; then
+    if [[ -z "$serial_port" ]] && ! config_is_true "$auto_detect"; then
         echo "[ERROR] 未配置串口设备 (serial.port)" >&2
         ((errors+=1))
     fi
@@ -169,30 +176,30 @@ config_validate() {
     # 验证通知配置（启用但缺少必要字段时告警但不阻断）
     local notify_enabled
     notify_enabled=$(config_read ".notify.enabled" "false")
-    if [[ "$notify_enabled" == "true" ]]; then
-        if [[ "$(config_read ".notify.telegram.enabled" "false")" == "true" ]]; then
+    if config_is_true "$notify_enabled"; then
+        if config_is_true "$(config_read ".notify.telegram.enabled" "false")"; then
             config_warn_required "Telegram" ".notify.telegram.bot_token"
             config_warn_required "Telegram" ".notify.telegram.chat_id"
         fi
-        if [[ "$(config_read ".notify.wechat.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.wechat.enabled" "false")"; then
             config_warn_required "微信" ".notify.wechat.send_key"
         fi
-        if [[ "$(config_read ".notify.wecom.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.wecom.enabled" "false")"; then
             config_warn_required "企业微信" ".notify.wecom.webhook_url"
         fi
-        if [[ "$(config_read ".notify.qq.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.qq.enabled" "false")"; then
             config_warn_required "QQ" ".notify.qq.qmsg_key"
         fi
-        if [[ "$(config_read ".notify.feishu.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.feishu.enabled" "false")"; then
             config_warn_required "飞书" ".notify.feishu.webhook_url"
         fi
-        if [[ "$(config_read ".notify.dingtalk.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.dingtalk.enabled" "false")"; then
             config_warn_required "钉钉" ".notify.dingtalk.webhook_url"
         fi
-        if [[ "$(config_read ".notify.bark.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.bark.enabled" "false")"; then
             config_warn_required "Bark" ".notify.bark.url"
         fi
-        if [[ "$(config_read ".notify.email.enabled" "false")" == "true" ]]; then
+        if config_is_true "$(config_read ".notify.email.enabled" "false")"; then
             config_warn_required "Email" ".notify.email.smtp_host"
             config_warn_required "Email" ".notify.email.username"
             config_warn_required "Email" ".notify.email.password"
