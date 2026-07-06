@@ -38,6 +38,8 @@ grep -q -- '--doctor' README.md || fail "README CLI options missing --doctor"
 grep -q 'Ubuntu ARM64' README.md || fail "README missing Apple Silicon Ubuntu ARM64 route"
 grep -q 'linux_arm64' README.md || fail "README missing VoHive linux_arm64 guidance"
 grep -q '未授权时发送真实短信' README.md || fail "README missing no-unauthorized-SMS warning"
+grep -q 'scripts/vm-readonly-check.sh' docs/hardware-diagnostics.md || fail "hardware docs missing VM readonly script"
+grep -q 'no SMS sent' scripts/vm-readonly-check.sh || fail "VM readonly check missing safety text"
 
 doctor_config_dir=$(mktemp -d)
 doctor_bin_dir=$(mktemp -d)
@@ -165,6 +167,35 @@ wwan_test_output=$(PATH="$doctor_bin_dir:$PATH" CARDPULSE_CONFIG_DIR="$doctor_co
 if [[ "$wwan_test_output" != *"Linux MBIM/QMI control candidate found"* ]]; then
     echo "$wwan_test_output" >&2
     fail "doctor should distinguish strong MBIM/QMI control candidates"
+fi
+
+vm_check_root=$(mktemp -d)
+mkdir -p "$vm_check_root/dev" "$vm_check_root/sys/bus/usb/devices/1-1"
+: > "$vm_check_root/dev/cdc-wdm0"
+: > "$vm_check_root/dev/wwan0"
+printf '2ca3\n' > "$vm_check_root/sys/bus/usb/devices/1-1/idVendor"
+printf '4006\n' > "$vm_check_root/sys/bus/usb/devices/1-1/idProduct"
+printf 'Baiwang\n' > "$vm_check_root/sys/bus/usb/devices/1-1/product"
+vm_check_output=$(CARDPULSE_DEV_ROOT="$vm_check_root/dev" CARDPULSE_SYS_ROOT="$vm_check_root/sys" bash scripts/vm-readonly-check.sh 2>&1 || true)
+if [[ "$vm_check_output" != *"MBIM_QMI_CONTROL_CANDIDATE=1"* || "$vm_check_output" != *"WWAN_NETWORK_CANDIDATE=1"* ]]; then
+    echo "$vm_check_output" >&2
+    fail "VM readonly check should report MBIM/QMI and WWAN candidates"
+fi
+if [[ "$vm_check_output" != *"vendor=2ca3 product=4006"* ]]; then
+    echo "$vm_check_output" >&2
+    fail "VM readonly check should report DJI/Baiwang sysfs hints"
+fi
+
+vm_empty_root=$(mktemp -d)
+mkdir -p "$vm_empty_root/dev" "$vm_empty_root/sys/bus/usb/devices"
+vm_empty_output=$(CARDPULSE_DEV_ROOT="$vm_empty_root/dev" CARDPULSE_SYS_ROOT="$vm_empty_root/sys" bash scripts/vm-readonly-check.sh 2>&1 || true)
+if [[ "$vm_empty_output" != *"AT_SERIAL_CANDIDATE=0"* || "$vm_empty_output" != *"MBIM_QMI_CONTROL_CANDIDATE=0"* || "$vm_empty_output" != *"WWAN_NETWORK_CANDIDATE=0"* ]]; then
+    echo "$vm_empty_output" >&2
+    fail "VM readonly check should report no candidates in empty environment"
+fi
+if [[ "$vm_empty_output" != *"readonly check only; no SMS sent"* ]]; then
+    echo "$vm_empty_output" >&2
+    fail "VM readonly check should print safety text"
 fi
 
 auto_detect_output=$(

@@ -10,6 +10,6 @@ python3 tests/validate_config_schema.py
 python3 tests/test_pdu_encoder.py
 bash tests/test_shell_behaviors.sh
 
-for file in bin/cardpulse lib/*.sh scripts/install.sh; do
+for file in bin/cardpulse lib/*.sh scripts/install.sh scripts/vm-readonly-check.sh; do
     bash -n "$file"
 done

@@ -60,6 +60,12 @@ ls /dev/cdc-wdm* /dev/wwan* /dev/ttyUSB* 2>/dev/null
 lsmod | grep -E 'qmi_wwan|cdc_mbim|wwan'
 ```
 
+仓库内提供了同等的只读采集脚本：
+
+```bash
+bash scripts/vm-readonly-check.sh | tee vm-readonly-check-output.txt
+```
+
 如果 VM 内出现 `/dev/cdc-wdm*` 或明确的 `qmi_wwan`、`cdc_mbim`、`wwan_qmi` 绑定，再构建 VoHive `linux_arm64` 版本做只读发现。不要运行现有 `linux_amd64` 二进制，也不要在未授权时发短信。
 
 ## DJI / Baiwang 2CA3:4006 状态
