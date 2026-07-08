@@ -409,14 +409,31 @@
       button.addEventListener("click", () => setView(button.dataset.view));
     });
 
-    async function api(path, options = {}) {
-      const response = await fetch(path, {
-        headers: {"Content-Type": "application/json"},
-        ...options
-      });
-      const data = await response.json();
-      data.http_status = response.status;
-      return data;
+    async function api(path, options = {}, timeoutMs = 25000) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetch(path, {
+          headers: {"Content-Type": "application/json"},
+          signal: controller.signal,
+          ...options
+        });
+        const data = await response.json();
+        data.http_status = response.status;
+        return data;
+      } catch (error) {
+        if (error.name === "AbortError") {
+          return {
+            ok: false,
+            message: "请求超时，请检查 Web 服务是否仍在运行，或串口是否被其他进程占用。",
+            output: "请求超时，请稍后重试。"
+          };
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timer);
+      }
     }
 
     function setStatus(id, text, ok) {
@@ -429,18 +446,25 @@
       $(id).textContent = data.output || data.message || "";
     }
 
+    function setMetric(id, value) {
+      if (value && value !== "-") {
+        $(id).textContent = value;
+      }
+    }
+
     function applyParsed(parsed) {
       if (!parsed) return;
-      $("sim").textContent = parsed.sim || parsed["sim_卡"] || "-";
-      $("rssi").textContent = parsed.rssi || parsed["信号强度"] || "-";
-      $("network").textContent = parsed.network_registration || parsed["网络状态"] || "-";
-      $("operator").textContent = parsed.operator || parsed["运营商"] || "-";
-      $("device").textContent = parsed.device || parsed["设备"] || "-";
-      $("imei").textContent = parsed.imei || "-";
+      setMetric("sim", parsed.sim || parsed["sim_卡"]);
+      setMetric("rssi", parsed.rssi || parsed["信号强度"]);
+      setMetric("network", parsed.network_registration || parsed["网络状态"]);
+      setMetric("operator", parsed.operator || parsed["运营商"]);
+      setMetric("device", parsed.device || parsed["设备"]);
+      setMetric("imei", parsed.imei);
     }
 
     async function refreshDoctor(targetStatus = "doctor-status", targetOutput = "doctor-output") {
       setStatus(targetStatus, "诊断中...", true);
+      setRaw(targetOutput, {output: "正在运行硬件诊断..."});
       const data = await api("/api/doctor");
       setRaw(targetOutput, data);
       applyParsed(data.parsed);
@@ -450,10 +474,12 @@
 
     async function refreshInfo() {
       setStatus("overview-status", "正在读取模块...", true);
+      setRaw("overview-output", {output: "正在读取模块信息..."});
       const data = await api("/api/info");
       setRaw("overview-output", data);
       applyParsed(data.parsed);
       setStatus("overview-status", data.ok ? "信息已刷新" : "信息读取失败", data.ok);
+      return data;
     }
 
     $("refresh-status").addEventListener("click", () => refreshDoctor("overview-status", "overview-output"));
@@ -462,6 +488,7 @@
 
     $("send-at").addEventListener("click", async () => {
       setStatus("at-status", "正在发送...", true);
+      setRaw("at-output", {output: "正在发送只读 AT 命令..."});
       const data = await api("/api/at", {
         method: "POST",
         body: JSON.stringify({
@@ -477,6 +504,7 @@
       if (!window.confirm("将使用当前 CardPulse 配置发送一条真实短信，是否继续？")) return;
       const token = window.prompt("请输入 SEND_SMS 进行二次确认");
       setStatus("sms-status", "正在发送...", true);
+      setRaw("sms-output", {output: "正在执行短信测试命令..."});
       const data = await api("/api/actions/test-sms", {
         method: "POST",
         body: JSON.stringify({confirm: token || ""})
@@ -490,12 +518,14 @@
       $("sms-gate").textContent = health.sms_enabled ? "已启用" : "短信测试默认关闭";
       $("sms-gate").classList.toggle("ok", health.sms_enabled);
       $("send-test-sms").disabled = !health.sms_enabled;
+      setRaw("overview-output", {output: "正在读取硬件状态..."});
       await refreshDoctor("overview-status", "overview-output");
       await refreshInfo();
     }
 
     boot().catch((error) => {
       setStatus("overview-status", error.message, false);
+      setRaw("overview-output", {output: error.message});
     });
   </script>
 </body>

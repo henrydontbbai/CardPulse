@@ -81,6 +81,14 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("测试短信", html)
         self.assertIn("短信测试默认关闭", html)
 
+    def test_web_ui_has_loading_and_timeout_feedback(self):
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("正在读取模块信息", html)
+        self.assertIn("正在运行硬件诊断", html)
+        self.assertIn("请求超时", html)
+        self.assertIn("function setMetric", html)
+
     def test_sms_test_requires_server_gate_and_confirmation(self):
         server, runner = self.start_server(allow_sms=False)
 
