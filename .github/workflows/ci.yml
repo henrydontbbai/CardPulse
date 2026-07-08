@@ -29,6 +29,7 @@ jobs:
           sudo install -o root -g root -m 0755 bin/cardpulse /usr/local/bin/cardpulse
           sudo install -o root -g root -m 0755 lib/*.sh /opt/cardpulse/lib/
           sudo install -o root -g root -m 0644 lib/pdu_encoder.py /opt/cardpulse/lib/pdu_encoder.py
+          sudo install -o root -g root -m 0644 lib/pdu_decoder.py /opt/cardpulse/lib/pdu_decoder.py
           sudo ln -sfn /opt/cardpulse/lib /usr/local/lib/cardpulse
       - name: Run installed CLI
         run: |
@@ -39,6 +40,8 @@ jobs:
         run: |
           CARDPULSE_LIB_DIR=/opt/cardpulse/lib bash -c 'source /opt/cardpulse/lib/at_modem.sh; test "$(at_resolve_pdu_encoder)" = "/opt/cardpulse/lib/pdu_encoder.py"'
           CARDPULSE_LIB_DIR=/opt/cardpulse/lib python3 /opt/cardpulse/lib/pdu_encoder.py "+8613800138000" "hello" | grep -q '05E8329BFD06'
+          CARDPULSE_LIB_DIR=/opt/cardpulse/lib bash -c 'source /opt/cardpulse/lib/sms_receiver.sh; test "$(sms_receive_decoder_path)" = "/opt/cardpulse/lib/pdu_decoder.py"'
+          CARDPULSE_LIB_DIR=/opt/cardpulse/lib python3 /opt/cardpulse/lib/pdu_decoder.py "00040B912143658709F100006270802143650005E8329BFD06" | grep -q '"text": "hello"'
 
   local-tests:
     name: Local Test Suite
@@ -60,7 +63,7 @@ jobs:
       - name: Install Ruff
         run: python3 -m pip install --user ruff==0.5.7
       - name: Run Ruff
-        run: ~/.local/bin/ruff check lib/pdu_encoder.py tests/*.py
+        run: ~/.local/bin/ruff check lib/pdu_encoder.py lib/pdu_decoder.py tests/*.py
 
   pdu-encode-test:
     name: PDU Encoding Test
