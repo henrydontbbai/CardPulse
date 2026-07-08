@@ -71,6 +71,16 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         self.assertFalse(data["sms_enabled"])
 
+    def test_web_ui_defaults_to_chinese(self):
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('<html lang="zh-CN">', html)
+        self.assertIn("设备概览", html)
+        self.assertIn("刷新信息", html)
+        self.assertIn("只读 AT 控制台", html)
+        self.assertIn("测试短信", html)
+        self.assertIn("短信测试默认关闭", html)
+
     def test_sms_test_requires_server_gate_and_confirmation(self):
         server, runner = self.start_server(allow_sms=False)
 

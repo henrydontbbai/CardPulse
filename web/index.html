@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CardPulse Web</title>
+  <title>CardPulse 控制台</title>
   <style>
     :root {
       color-scheme: light;
@@ -315,29 +315,29 @@
         <div class="mark">CP</div>
         <h1>CardPulse</h1>
       </div>
-      <nav class="nav" aria-label="Views">
-        <button class="active" data-view="overview">Overview</button>
-        <button data-view="doctor">Doctor</button>
-        <button data-view="terminal">AT Console</button>
-        <button data-view="sms">SMS Test</button>
+      <nav class="nav" aria-label="视图">
+        <button class="active" data-view="overview">设备概览</button>
+        <button data-view="doctor">硬件诊断</button>
+        <button data-view="terminal">AT 控制台</button>
+        <button data-view="sms">测试短信</button>
       </nav>
     </aside>
 
     <main>
       <section id="overview" class="section active">
         <div class="topbar">
-          <h2>Device Overview</h2>
+          <h2>设备概览</h2>
           <div class="actions">
-            <button class="secondary" id="refresh-status">Refresh Status</button>
-            <button class="primary" id="refresh-info">Refresh Info</button>
+            <button class="secondary" id="refresh-status">刷新状态</button>
+            <button class="primary" id="refresh-info">刷新信息</button>
           </div>
         </div>
         <div class="grid">
-          <div class="panel metric"><label>SIM</label><strong id="sim">-</strong></div>
-          <div class="panel metric"><label>RSSI</label><strong id="rssi">-</strong></div>
-          <div class="panel metric"><label>Network</label><strong id="network">-</strong></div>
-          <div class="panel metric"><label>Operator</label><strong id="operator">-</strong></div>
-          <div class="panel metric wide"><label>Device</label><strong id="device">-</strong></div>
+          <div class="panel metric"><label>SIM 状态</label><strong id="sim">-</strong></div>
+          <div class="panel metric"><label>信号 RSSI</label><strong id="rssi">-</strong></div>
+          <div class="panel metric"><label>网络注册</label><strong id="network">-</strong></div>
+          <div class="panel metric"><label>运营商</label><strong id="operator">-</strong></div>
+          <div class="panel metric wide"><label>设备端口</label><strong id="device">-</strong></div>
           <div class="panel metric wide"><label>IMEI</label><strong id="imei">-</strong></div>
         </div>
         <div class="panel">
@@ -348,9 +348,9 @@
 
       <section id="doctor" class="section">
         <div class="topbar">
-          <h2>Doctor</h2>
+          <h2>硬件诊断</h2>
           <div class="actions">
-            <button class="primary" id="run-doctor">Run Doctor</button>
+            <button class="primary" id="run-doctor">运行诊断</button>
           </div>
         </div>
         <div class="panel">
@@ -361,8 +361,8 @@
 
       <section id="terminal" class="section">
         <div class="topbar">
-          <h2>AT Console</h2>
-          <span class="badge">Read only</span>
+          <h2>只读 AT 控制台</h2>
+          <span class="badge">只读</span>
         </div>
         <div class="panel">
           <div class="form-row">
@@ -372,7 +372,7 @@
               <option value="5" selected>5s</option>
               <option value="10">10s</option>
             </select>
-            <button class="primary" id="send-at">Send</button>
+            <button class="primary" id="send-at">发送</button>
           </div>
           <div class="status-line" id="at-status"></div>
           <pre class="raw" id="at-output"></pre>
@@ -381,12 +381,12 @@
 
       <section id="sms" class="section">
         <div class="topbar">
-          <h2>SMS Test</h2>
-          <span class="badge warn" id="sms-gate">Disabled</span>
+          <h2>测试短信</h2>
+          <span class="badge warn" id="sms-gate">短信测试默认关闭</span>
         </div>
         <div class="panel">
           <div class="actions" style="justify-content:flex-start;margin-bottom:12px;">
-            <button class="danger" id="send-test-sms" disabled>Send Test SMS</button>
+            <button class="danger" id="send-test-sms" disabled>发送测试短信</button>
           </div>
           <div class="status-line" id="sms-status"></div>
           <pre class="raw" id="sms-output"></pre>
@@ -440,20 +440,20 @@
     }
 
     async function refreshDoctor(targetStatus = "doctor-status", targetOutput = "doctor-output") {
-      setStatus(targetStatus, "Running...", true);
+      setStatus(targetStatus, "诊断中...", true);
       const data = await api("/api/doctor");
       setRaw(targetOutput, data);
       applyParsed(data.parsed);
-      setStatus(targetStatus, data.ok ? "Doctor passed" : "Doctor returned warnings", data.ok);
+      setStatus(targetStatus, data.ok ? "诊断通过" : "诊断返回警告", data.ok);
       return data;
     }
 
     async function refreshInfo() {
-      setStatus("overview-status", "Reading modem...", true);
+      setStatus("overview-status", "正在读取模块...", true);
       const data = await api("/api/info");
       setRaw("overview-output", data);
       applyParsed(data.parsed);
-      setStatus("overview-status", data.ok ? "Info refreshed" : "Info command failed", data.ok);
+      setStatus("overview-status", data.ok ? "信息已刷新" : "信息读取失败", data.ok);
     }
 
     $("refresh-status").addEventListener("click", () => refreshDoctor("overview-status", "overview-output"));
@@ -461,7 +461,7 @@
     $("run-doctor").addEventListener("click", () => refreshDoctor());
 
     $("send-at").addEventListener("click", async () => {
-      setStatus("at-status", "Sending...", true);
+      setStatus("at-status", "正在发送...", true);
       const data = await api("/api/at", {
         method: "POST",
         body: JSON.stringify({
@@ -470,24 +470,24 @@
         })
       });
       setRaw("at-output", data);
-      setStatus("at-status", data.ok ? "Command completed" : data.message || "Command failed", data.ok);
+      setStatus("at-status", data.ok ? "命令已完成" : data.message || "命令失败", data.ok);
     });
 
     $("send-test-sms").addEventListener("click", async () => {
-      if (!window.confirm("Send a real SMS using the current CardPulse config?")) return;
-      const token = window.prompt("Type SEND_SMS to confirm");
-      setStatus("sms-status", "Sending...", true);
+      if (!window.confirm("将使用当前 CardPulse 配置发送一条真实短信，是否继续？")) return;
+      const token = window.prompt("请输入 SEND_SMS 进行二次确认");
+      setStatus("sms-status", "正在发送...", true);
       const data = await api("/api/actions/test-sms", {
         method: "POST",
         body: JSON.stringify({confirm: token || ""})
       });
       setRaw("sms-output", data);
-      setStatus("sms-status", data.ok ? "SMS command completed" : data.message || "SMS command failed", data.ok);
+      setStatus("sms-status", data.ok ? "短信命令已完成" : data.message || "短信命令失败", data.ok);
     });
 
     async function boot() {
       const health = await api("/api/health");
-      $("sms-gate").textContent = health.sms_enabled ? "Enabled" : "Disabled";
+      $("sms-gate").textContent = health.sms_enabled ? "已启用" : "短信测试默认关闭";
       $("sms-gate").classList.toggle("ok", health.sms_enabled);
       $("send-test-sms").disabled = !health.sms_enabled;
       await refreshDoctor("overview-status", "overview-output");
