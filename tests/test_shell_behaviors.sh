@@ -31,6 +31,9 @@ help_output=$(bash bin/cardpulse --help 2>&1)
 if [[ "$help_output" != *"--doctor"* ]]; then
     fail "CLI help missing --doctor option"
 fi
+if [[ "$help_output" != *"--sms-status"* || "$help_output" != *"--inbox"* || "$help_output" != *"--read-sms INDEX"* || "$help_output" != *"--delete-sms INDEX"* ]]; then
+    fail "CLI help missing SMS inbox options"
+fi
 if [[ "$help_output" != *"will not send SMS or write CardPulse state"* ]]; then
     fail "CLI help must state doctor will not send SMS"
 fi
@@ -216,6 +219,65 @@ auto_detect_output=$(
 if [[ "$auto_detect_output" != "/tmp/cardpulse-fake-serial" ]]; then
     fail "sms_detect_device should accept Python YAML boolean True"
 fi
+
+sms_status_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CSMS?") printf '\r\n+CSMS: 0,1,1,1\r\n\r\nOK\r\n' ;;
+          "AT+CPMS?") printf '\r\n+CPMS: "ME",23,23,"ME",23,23,"ME",23,23\r\n\r\nOK\r\n' ;;
+          "AT+CMGF?") printf '\r\n+CMGF: 0\r\n\r\nOK\r\n' ;;
+          "AT+CNMI?") printf '\r\n+CNMI: 2,1,0,0,0\r\n\r\nOK\r\n' ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_status
+)
+if [[ "$sms_status_output" != *"Storage: ME 23/23 FULL"* || "$sms_status_output" != *"Format: PDU"* || "$sms_status_output" != *"New message indication: 2,1,0,0,0"* ]]; then
+    echo "$sms_status_output" >&2
+    fail "sms status should summarize full storage, PDU mode, and CNMI"
+fi
+
+sms_inbox_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CMGF=0") printf '\r\nOK\r\n' ;;
+          "AT+CMGL=4") printf '\r\n+CMGL: 1,1,,25\r\n00040D91683120553293F100086270807164000004004F004B\r\n\r\nOK\r\n' ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_list
+)
+if [[ "$sms_inbox_output" != *"Index: 1"* || "$sms_inbox_output" != *"Status: REC READ"* || "$sms_inbox_output" != *"From: +8613025523391"* || "$sms_inbox_output" != *"Preview: OK"* ]]; then
+    echo "$sms_inbox_output" >&2
+    fail "sms inbox should decode common PDU SMS-DELIVER entries"
+fi
+
+sms_read_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CMGF=0") printf '\r\nOK\r\n' ;;
+          "AT+CMGR=1") printf '\r\n+CMGR: 1,,25\r\n00040D91683120553293F100086270807164000004004F004B\r\n\r\nOK\r\n' ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_read 1
+)
+if [[ "$sms_read_output" != *"Index: 1"* || "$sms_read_output" != *"Message: OK"* ]]; then
+    echo "$sms_read_output" >&2
+    fail "sms read should decode one PDU message"
+fi
+
+delete_missing_confirm_output=$(bash bin/cardpulse --delete-sms 1 2>&1 || true)
+if [[ "$delete_missing_confirm_output" != *"--confirm DELETE_SMS"* ]]; then
+    echo "$delete_missing_confirm_output" >&2
+    fail "delete-sms must require confirmation before config or device access"
+fi
+
+expect_failure_contains "SMS index must be a single non-negative integer" bash bin/cardpulse --read-sms 1-3
+expect_failure_contains "SMS index must be a single non-negative integer" bash bin/cardpulse --delete-sms abc --confirm DELETE_SMS
 
 grep -q 'acquire_singleton_lock' bin/cardpulse || fail "CLI missing singleton lock helper"
 grep -q 'flock not found' bin/cardpulse || fail "CLI missing macOS flock fallback warning"

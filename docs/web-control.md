@@ -40,6 +40,7 @@ Keep this on a trusted local network only. The first version is a local operatio
 - Device overview from `cardpulse --doctor` and `cardpulse --info`
 - Raw command output for troubleshooting
 - Read-only AT console with an allowlist
+- SMS inbox status, listing, single-message read, and guarded single-message delete
 - Guarded test SMS action
 
 The read-only AT console accepts only safe query commands such as:
@@ -59,6 +60,23 @@ AT+CCID
 ```
 
 Commands that can change modem state or send SMS, such as `AT+CFUN=0` and `AT+CMGS=...`, are blocked by default.
+
+## SMS Inbox
+
+The inbox view calls the safe CLI receive commands:
+
+```bash
+cardpulse --sms-status
+cardpulse --inbox
+cardpulse --read-sms INDEX
+cardpulse --delete-sms INDEX --confirm DELETE_SMS
+```
+
+Inbox reads do not delete messages and do not persist message bodies to CardPulse state. Reading an unread SMS may still cause the modem to mark that SMS as read.
+
+The current DJI/Baiwang QDC507 module reports SMS receive support through `AT+CSMS?`, `AT+CPMS?`, `AT+CMGF?`, and `AT+CNMI?`. If storage is full, for example `Storage: ME 23/23 FULL`, list the inbox first and delete only a known disposable message by explicit index.
+
+Web delete requires the same `DELETE_SMS` confirmation token and only deletes one index per request.
 
 ## SMS Safety Gate
 

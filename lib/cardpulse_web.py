@@ -130,6 +130,10 @@ def is_readonly_at_command(cmd: str) -> bool:
     return normalized in READONLY_AT_COMMANDS
 
 
+def is_sms_index(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9]+", value) is not None
+
+
 class CardPulseRunner:
     def __init__(
         self,
@@ -269,6 +273,16 @@ def make_handler(
                     self.send_json(200, payload)
                 elif path == "/api/status":
                     self.send_json(200, result_payload(runner.run_cardpulse(["--status"])))
+                elif path == "/api/sms/status":
+                    self.send_json(200, result_payload(runner.run_cardpulse(["--sms-status"])))
+                elif path == "/api/sms/inbox":
+                    self.send_json(200, result_payload(runner.run_cardpulse(["--inbox"])))
+                elif path.startswith("/api/sms/messages/"):
+                    index = path.rsplit("/", 1)[-1]
+                    if not is_sms_index(index):
+                        self.send_json(400, {"ok": False, "message": "SMS index must be a single non-negative integer"})
+                        return
+                    self.send_json(200, result_payload(runner.run_cardpulse(["--read-sms", index])))
                 else:
                     self.send_json(404, {"ok": False, "message": "not found"})
             except subprocess.TimeoutExpired:
@@ -284,6 +298,8 @@ def make_handler(
                     self.handle_test_sms(data)
                 elif path == "/api/at":
                     self.handle_at(data)
+                elif path == "/api/sms/delete":
+                    self.handle_delete_sms(data)
                 else:
                     self.send_json(404, {"ok": False, "message": "not found"})
             except ValueError as exc:
@@ -314,6 +330,16 @@ def make_handler(
                 self.send_json(400, {"ok": False, "message": "AT command is not in the read-only allowlist"})
                 return
             self.send_json(200, result_payload(runner.run_at(cmd, timeout)))
+
+        def handle_delete_sms(self, data: dict[str, Any]) -> None:
+            index = str(data.get("index", "")).strip()
+            if not is_sms_index(index):
+                self.send_json(400, {"ok": False, "message": "SMS index must be a single non-negative integer"})
+                return
+            if data.get("confirm") != "DELETE_SMS":
+                self.send_json(400, {"ok": False, "message": "SMS delete requires confirmation token DELETE_SMS"})
+                return
+            self.send_json(200, result_payload(runner.run_cardpulse(["--delete-sms", index, "--confirm", "DELETE_SMS"])))
 
     return CardPulseWebHandler
 

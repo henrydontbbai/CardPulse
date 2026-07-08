@@ -36,6 +36,14 @@ class FakeRunner:
                 "\u8fd0\u8425\u5546: CHINA MOBILE\n",
                 "",
             )
+        if args == ["--sms-status"]:
+            return cardpulse_web.CommandResult(0, "Storage: ME 23/23 FULL", "")
+        if args == ["--inbox"]:
+            return cardpulse_web.CommandResult(0, "Index: 1\nFrom: +8613025523391\nPreview: OK", "")
+        if args == ["--read-sms", "1"]:
+            return cardpulse_web.CommandResult(0, "Index: 1\nMessage: OK", "")
+        if args == ["--delete-sms", "1", "--confirm", "DELETE_SMS"]:
+            return cardpulse_web.CommandResult(0, "Deleted SMS index: 1", "")
         return cardpulse_web.CommandResult(0, "ran " + " ".join(args), "")
 
     def run_at(self, cmd, timeout):
@@ -103,6 +111,16 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("请求超时", html)
         self.assertIn("function setMetric", html)
 
+    def test_web_ui_has_sms_inbox_controls(self):
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-view="inbox"', html)
+        self.assertIn("短信收件箱", html)
+        self.assertIn("/api/sms/status", html)
+        self.assertIn("/api/sms/inbox", html)
+        self.assertIn("/api/sms/delete", html)
+        self.assertIn("DELETE_SMS", html)
+
     def test_windows_recovery_script_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
 
@@ -156,6 +174,46 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
         self.assertEqual(runner.commands, [["--test"]])
+
+    def test_sms_inbox_api_routes_to_cli_without_enabling_sms_send(self):
+        server, runner = self.start_server(allow_sms=False)
+
+        status, data = self.request(server, "GET", "/api/sms/status")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIn("FULL", data["output"])
+
+        status, data = self.request(server, "GET", "/api/sms/inbox")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIn("Index: 1", data["output"])
+
+        status, data = self.request(server, "GET", "/api/sms/messages/1")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIn("Message: OK", data["output"])
+
+        self.assertEqual(runner.commands, [["--sms-status"], ["--inbox"], ["--read-sms", "1"]])
+
+    def test_sms_delete_api_requires_single_index_and_confirmation(self):
+        server, runner = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/sms/messages/1-3")
+        self.assertEqual(status, 400)
+        self.assertIn("index", data["message"])
+
+        status, data = self.request(server, "POST", "/api/sms/delete", {"index": "1"})
+        self.assertEqual(status, 400)
+        self.assertIn("confirmation", data["message"])
+
+        status, data = self.request(server, "POST", "/api/sms/delete", {"index": "abc", "confirm": "DELETE_SMS"})
+        self.assertEqual(status, 400)
+        self.assertIn("index", data["message"])
+
+        status, data = self.request(server, "POST", "/api/sms/delete", {"index": "1", "confirm": "DELETE_SMS"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(runner.commands, [["--delete-sms", "1", "--confirm", "DELETE_SMS"]])
 
     def test_manual_at_allows_only_readonly_commands_by_default(self):
         self.assertTrue(cardpulse_web.is_readonly_at_command("AT+CSQ"))

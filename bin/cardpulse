@@ -37,7 +37,7 @@ resolve_lib_dir() {
 
     local dir
     for dir in "${candidates[@]}"; do
-        if [[ -r "$dir/config_reader.sh" && -r "$dir/at_modem.sh" && -r "$dir/sms_sender.sh" && -r "$dir/state_manager.sh" && -r "$dir/notifier.sh" ]]; then
+        if [[ -r "$dir/config_reader.sh" && -r "$dir/at_modem.sh" && -r "$dir/sms_sender.sh" && -r "$dir/sms_receiver.sh" && -r "$dir/state_manager.sh" && -r "$dir/notifier.sh" ]]; then
             echo "$dir"
             return 0
         fi
@@ -52,6 +52,7 @@ load_modules() {
     source "${LIB_DIR}/config_reader.sh"
     source "${LIB_DIR}/at_modem.sh"
     source "${LIB_DIR}/sms_sender.sh"
+    source "${LIB_DIR}/sms_receiver.sh"
     source "${LIB_DIR}/state_manager.sh"
     source "${LIB_DIR}/notifier.sh"
 }
@@ -68,6 +69,11 @@ show_help() {
     echo "  -s, --status         Show local send state"
     echo "  -t, --test           Send a test SMS without recording state"
     echo "  -i, --info           Show modem information"
+    echo "  --sms-status         Show SMS storage and receive status"
+    echo "  --inbox              List SMS inbox entries without deleting them"
+    echo "  --read-sms INDEX     Read one SMS by index"
+    echo "  --delete-sms INDEX   Delete one SMS by index; requires --confirm DELETE_SMS"
+    echo "  --confirm TOKEN      Confirmation token for dangerous actions"
     echo "  -r, --reset          Reset local send state"
     echo "  -n, --notify         Test notification delivery"
     echo "  --notify-channel CH  Test one notification channel (telegram|wechat|wecom|qq|feishu|dingtalk|bark|email)"
@@ -106,6 +112,44 @@ validate_notify_channel() {
             exit 1
             ;;
     esac
+}
+
+validate_sms_index_arg() {
+    local index="$1"
+    if [[ ! "$index" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}[ERROR] SMS index must be a single non-negative integer${NC}" >&2
+        exit 1
+    fi
+}
+
+with_sms_device() {
+    local action="$1"
+    local index="${2:-}"
+    local device
+    device=$(sms_detect_device) || device=""
+    if [[ -z "$device" ]]; then
+        echo -e "${RED}[ERROR] No AT serial port found.${NC}" >&2
+        echo "[INFO] Run 'cardpulse --doctor' for read-only diagnostics." >&2
+        exit 1
+    fi
+
+    local baudrate
+    baudrate=$(config_read ".serial.baudrate" "115200")
+    if ! at_init "$device" "$baudrate"; then
+        echo -e "${RED}[ERROR] Failed to open serial port.${NC}" >&2
+        exit 1
+    fi
+
+    local exit_code=0
+    case "$action" in
+        status) sms_receive_status || exit_code=$? ;;
+        inbox) sms_receive_list || exit_code=$? ;;
+        read) sms_receive_read "$index" || exit_code=$? ;;
+        delete) sms_receive_delete "$index" || exit_code=$? ;;
+        *) echo -e "${RED}[ERROR] Unknown SMS action: $action${NC}" >&2; exit_code=1 ;;
+    esac
+    at_close
+    exit "$exit_code"
 }
 
 acquire_singleton_lock() {
@@ -369,6 +413,11 @@ main() {
     local reset_state=false
     local test_notify=false
     local doctor_mode=false
+    local sms_status=false
+    local sms_inbox=false
+    local read_sms_index=""
+    local delete_sms_index=""
+    local confirm_token=""
     local notify_channel=""
     local config_path=""
 
@@ -394,6 +443,31 @@ main() {
             -i|--info)
                 show_info=true
                 shift
+                ;;
+            --sms-status)
+                sms_status=true
+                shift
+                ;;
+            --inbox)
+                sms_inbox=true
+                shift
+                ;;
+            --read-sms)
+                require_arg "$1" "${2:-}"
+                validate_sms_index_arg "$2"
+                read_sms_index="$2"
+                shift 2
+                ;;
+            --delete-sms)
+                require_arg "$1" "${2:-}"
+                validate_sms_index_arg "$2"
+                delete_sms_index="$2"
+                shift 2
+                ;;
+            --confirm)
+                require_arg "$1" "${2:-}"
+                confirm_token="$2"
+                shift 2
                 ;;
             -r|--reset)
                 reset_state=true
@@ -433,6 +507,10 @@ main() {
         echo -e "${RED}[ERROR] --notify-channel requires --notify${NC}" >&2
         exit 1
     fi
+    if [[ -n "$delete_sms_index" && "$confirm_token" != "DELETE_SMS" ]]; then
+        echo -e "${RED}[ERROR] --delete-sms requires --confirm DELETE_SMS${NC}" >&2
+        exit 1
+    fi
 
     load_modules
 
@@ -447,6 +525,19 @@ main() {
 
     if ! config_init; then
         exit 1
+    fi
+
+    if [[ "$sms_status" == "true" ]]; then
+        with_sms_device status
+    fi
+    if [[ "$sms_inbox" == "true" ]]; then
+        with_sms_device inbox
+    fi
+    if [[ -n "$read_sms_index" ]]; then
+        with_sms_device read "$read_sms_index"
+    fi
+    if [[ -n "$delete_sms_index" ]]; then
+        with_sms_device delete "$delete_sms_index"
     fi
 
     state_init

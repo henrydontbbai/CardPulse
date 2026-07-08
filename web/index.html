@@ -320,6 +320,7 @@
         <button data-view="doctor">硬件诊断</button>
         <button data-view="terminal">AT 控制台</button>
         <button data-view="sms">测试短信</button>
+        <button data-view="inbox">收件箱</button>
       </nav>
     </aside>
 
@@ -390,6 +391,26 @@
           </div>
           <div class="status-line" id="sms-status"></div>
           <pre class="raw" id="sms-output"></pre>
+        </div>
+      </section>
+
+      <section id="inbox" class="section">
+        <div class="topbar">
+          <h2>短信收件箱</h2>
+          <span class="badge">只读优先</span>
+        </div>
+        <div class="panel">
+          <div class="actions" style="justify-content:flex-start;margin-bottom:12px;">
+            <button class="secondary" id="refresh-sms-status">刷新存储状态</button>
+            <button class="primary" id="refresh-inbox">读取收件箱</button>
+          </div>
+          <div class="form-row">
+            <input class="command" id="sms-index" value="1" autocomplete="off">
+            <button class="secondary" id="read-sms">读取单条</button>
+            <button class="danger" id="delete-sms">删除单条</button>
+          </div>
+          <div class="status-line" id="inbox-status"></div>
+          <pre class="raw" id="inbox-output"></pre>
         </div>
       </section>
     </main>
@@ -511,6 +532,47 @@
       });
       setRaw("sms-output", data);
       setStatus("sms-status", data.ok ? "短信命令已完成" : data.message || "短信命令失败", data.ok);
+    });
+
+    function smsIndex() {
+      return $("sms-index").value.trim();
+    }
+
+    $("refresh-sms-status").addEventListener("click", async () => {
+      setStatus("inbox-status", "正在读取短信存储状态...", true);
+      setRaw("inbox-output", {output: "正在查询 AT+CPMS / AT+CNMI 状态..."});
+      const data = await api("/api/sms/status");
+      setRaw("inbox-output", data);
+      setStatus("inbox-status", data.ok ? "短信存储状态已刷新" : data.message || "读取失败", data.ok);
+    });
+
+    $("refresh-inbox").addEventListener("click", async () => {
+      setStatus("inbox-status", "正在读取收件箱...", true);
+      setRaw("inbox-output", {output: "正在读取短信列表；未读短信可能被模块标记为已读，但不会删除。"});
+      const data = await api("/api/sms/inbox", {}, 45000);
+      setRaw("inbox-output", data);
+      setStatus("inbox-status", data.ok ? "收件箱已刷新" : data.message || "读取失败", data.ok);
+    });
+
+    $("read-sms").addEventListener("click", async () => {
+      const index = smsIndex();
+      setStatus("inbox-status", `正在读取短信 ${index}...`, true);
+      const data = await api(`/api/sms/messages/${encodeURIComponent(index)}`);
+      setRaw("inbox-output", data);
+      setStatus("inbox-status", data.ok ? "短信已读取" : data.message || "读取失败", data.ok);
+    });
+
+    $("delete-sms").addEventListener("click", async () => {
+      const index = smsIndex();
+      if (!window.confirm(`只删除索引 ${index} 这一条短信，是否继续？`)) return;
+      const token = window.prompt("请输入 DELETE_SMS 进行二次确认");
+      setStatus("inbox-status", `正在删除短信 ${index}...`, true);
+      const data = await api("/api/sms/delete", {
+        method: "POST",
+        body: JSON.stringify({index, confirm: token || ""})
+      });
+      setRaw("inbox-output", data);
+      setStatus("inbox-status", data.ok ? "短信已删除" : data.message || "删除失败", data.ok);
     });
 
     async function boot() {

@@ -275,6 +275,23 @@ powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 
 详见 [docs/web-control.md](docs/web-control.md)。
 
+## 短信接收 / 收件箱
+
+CardPulse 现在提供安全收件箱命令：
+
+```bash
+cardpulse --sms-status
+cardpulse --inbox
+cardpulse --read-sms 1
+cardpulse --delete-sms 1 --confirm DELETE_SMS
+```
+
+默认行为是只读：`--inbox` 和 `--read-sms` 不会删除短信，也不会把短信正文写入 CardPulse 状态文件。读取未读短信时，模块自身可能把该短信标记为已读。
+
+DJI/Baiwang QDC507 已验证支持短信接收相关 AT 查询：`AT+CSMS?`、`AT+CPMS?`、`AT+CMGF?`、`AT+CNMI?`。如果 `--sms-status` 显示类似 `Storage: ME 23/23 FULL`，说明模块短信存储已满，需要先查看收件箱并手动删除无用短信，才能稳定接收新短信。
+
+删除短信必须显式指定单条索引，并提供确认令牌 `DELETE_SMS`；CardPulse 不提供自动清空或批量删除。
+
 ## License
 
 [MIT](LICENSE)
