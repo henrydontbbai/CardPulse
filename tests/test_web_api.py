@@ -22,6 +22,20 @@ class FakeRunner:
 
     def run_cardpulse(self, args):
         self.commands.append(list(args))
+        if args == ["--info"]:
+            return cardpulse_web.CommandResult(
+                0,
+                "\u8bbe\u5907: /dev/ttyUSB2\n"
+                "\u6ce2\u7279\u7387: 115200\n"
+                "\u5382\u5546: Baiwang\n"
+                "\u578b\u53f7: QDC507\n"
+                "IMEI: 863212060375703\n"
+                "SIM \u5361: READY\n"
+                "\u4fe1\u53f7\u5f3a\u5ea6: 21\n"
+                "\u7f51\u7edc\u72b6\u6001: 5\n"
+                "\u8fd0\u8425\u5546: CHINA MOBILE\n",
+                "",
+            )
         return cardpulse_web.CommandResult(0, "ran " + " ".join(args), "")
 
     def run_at(self, cmd, timeout):
@@ -88,6 +102,31 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("正在运行硬件诊断", html)
         self.assertIn("请求超时", html)
         self.assertIn("function setMetric", html)
+
+    def test_windows_recovery_script_keeps_sms_disabled_by_default(self):
+        script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("usbipd.exe attach --wsl --busid", script)
+        self.assertIn("scripts/dji-qdc507-wsl-prepare.sh", script)
+        self.assertIn("--host $HostBind --port $Port$allowSmsArg", script)
+        self.assertIn("SMS test remains disabled", script)
+        self.assertIn("~/.cardpulse-dji/config/config.yaml", (ROOT_DIR / "docs" / "web-control.md").read_text(encoding="utf-8"))
+        self.assertNotIn("1024", script)
+
+    def test_info_endpoint_adds_normalized_summary_fields(self):
+        server, runner = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/info")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(runner.commands, [["--info"]])
+        self.assertEqual(data["device"], "/dev/ttyUSB2")
+        self.assertEqual(data["sim"], "READY")
+        self.assertEqual(data["signal"], "21")
+        self.assertEqual(data["network"], "5")
+        self.assertEqual(data["operator"], "CHINA MOBILE")
+        self.assertEqual(data["imei"], "863212060375703")
 
     def test_sms_test_requires_server_gate_and_confirmation(self):
         server, runner = self.start_server(allow_sms=False)

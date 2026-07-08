@@ -267,6 +267,12 @@ python3 scripts/cardpulse-web.py --host 0.0.0.0 --port 8765
 
 Web 控制台默认只提供状态、诊断、设备信息和只读 AT 查询。真实测试短信默认关闭；如需启用，必须启动时显式加 `--allow-sms`，并在页面中二次输入 `SEND_SMS`。
 
+Windows + WSL 的 DJI/Baiwang 模块可用一键恢复脚本启动只读控制台：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
+```
+
 详见 [docs/web-control.md](docs/web-control.md)。
 
 ## License

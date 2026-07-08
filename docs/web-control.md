@@ -101,3 +101,29 @@ Helper command inside WSL:
 ```bash
 sudo bash scripts/dji-qdc507-wsl-prepare.sh
 ```
+
+## One-command Windows recovery
+
+From a Windows PowerShell prompt in the CardPulse project root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
+```
+
+This performs the normal recovery path:
+
+- keeps `Ubuntu-24.04` alive
+- attaches DJI/Baiwang USB bus `1-4` through `usbipd`
+- runs `scripts/dji-qdc507-wsl-prepare.sh` inside WSL
+- starts CardPulse Web at `http://127.0.0.1:8765`
+- keeps SMS test disabled unless `-AllowSms` is explicitly passed
+
+If WSL `sudo` has no cached password, either run `sudo true` once inside Ubuntu first, or pass a local testing password with `-SudoPassword`. Do not store that password in the repository.
+
+The script uses a stable WSL config path:
+
+```text
+~/.cardpulse-dji/config/config.yaml
+```
+
+If the stable config does not exist yet, it copies the existing `/tmp/cardpulse-dji-test/config/config.yaml` when available; otherwise it creates a safe local test config for `/dev/ttyUSB2`.

@@ -100,6 +100,29 @@ def result_payload(result: CommandResult, *, parsed: Optional[dict[str, str]] = 
     }
 
 
+def first_parsed_value(parsed: dict[str, str], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = parsed.get(key)
+        if value:
+            return value
+    return ""
+
+
+def info_summary(parsed: dict[str, str]) -> dict[str, str]:
+    return {
+        "device": first_parsed_value(parsed, ("device", "\u8bbe\u5907")),
+        "baudrate": first_parsed_value(parsed, ("baudrate", "\u6ce2\u7279\u7387")),
+        "vendor": first_parsed_value(parsed, ("vendor", "\u5382\u5546")),
+        "model": first_parsed_value(parsed, ("model", "\u578b\u53f7")),
+        "imei": first_parsed_value(parsed, ("imei",)),
+        "firmware": first_parsed_value(parsed, ("firmware", "version", "\u7248\u672c")),
+        "sim": first_parsed_value(parsed, ("sim", "sim_card", "sim_\u5361")),
+        "signal": first_parsed_value(parsed, ("signal", "rssi", "\u4fe1\u53f7\u5f3a\u5ea6")),
+        "network": first_parsed_value(parsed, ("network", "network_registration", "\u7f51\u7edc\u72b6\u6001")),
+        "operator": first_parsed_value(parsed, ("operator", "\u8fd0\u8425\u5546")),
+    }
+
+
 def is_readonly_at_command(cmd: str) -> bool:
     normalized = (cmd or "").strip().upper()
     if not normalized or CONTROL_RE.search(normalized):
@@ -241,7 +264,9 @@ def make_handler(
                 elif path == "/api/doctor":
                     self.send_json(200, result_payload(runner.run_cardpulse(["--doctor"])))
                 elif path == "/api/info":
-                    self.send_json(200, result_payload(runner.run_cardpulse(["--info"])))
+                    payload = result_payload(runner.run_cardpulse(["--info"]))
+                    payload.update(info_summary(payload["parsed"]))
+                    self.send_json(200, payload)
                 elif path == "/api/status":
                     self.send_json(200, result_payload(runner.run_cardpulse(["--status"])))
                 else:
