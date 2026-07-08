@@ -12,7 +12,7 @@ RUN groupadd -r cardpulse && \
     useradd -r -g cardpulse -G dialout -d /home/cardpulse -m cardpulse
 
 COPY bin/cardpulse /usr/local/bin/cardpulse
-COPY lib/*.sh lib/pdu_encoder.py /opt/cardpulse/lib/
+COPY lib/*.sh lib/pdu_encoder.py lib/pdu_decoder.py /opt/cardpulse/lib/
 RUN chmod +x /usr/local/bin/cardpulse /opt/cardpulse/lib/*.sh
 ENV CARDPULSE_LIB_DIR=/opt/cardpulse/lib
 ENV CARDPULSE_CONFIG_DIR=/home/cardpulse/.cardpulse

@@ -186,6 +186,9 @@ install_cardpulse() {
     if [[ -f "$PROJECT_DIR/lib/pdu_encoder.py" ]]; then
         install -o root -g root -m 0644 "$PROJECT_DIR/lib/pdu_encoder.py" "$LIB_DIR/pdu_encoder.py"
     fi
+    if [[ -f "$PROJECT_DIR/lib/pdu_decoder.py" ]]; then
+        install -o root -g root -m 0644 "$PROJECT_DIR/lib/pdu_decoder.py" "$LIB_DIR/pdu_decoder.py"
+    fi
     
     # 创建符号链接
     ln -sf "$LIB_DIR" /usr/local/lib/cardpulse

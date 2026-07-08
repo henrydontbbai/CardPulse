@@ -308,6 +308,8 @@ grep -q -- '--no-systemd' scripts/install.sh || fail "installer missing --no-sys
 grep -q -- '--no-cron' scripts/install.sh || fail "installer missing --no-cron flag"
 grep -q -- '--with-cron' scripts/install.sh || fail "installer missing --with-cron flag"
 grep -q 'setup_scheduler' scripts/install.sh || fail "installer missing setup_scheduler"
+grep -q 'pdu_decoder.py' scripts/install.sh || fail "installer should install PDU decoder"
+grep -q 'pdu_decoder.py' Dockerfile || fail "Docker image should include PDU decoder"
 
 grep -q 'at_configure_stty' lib/at_modem.sh || fail "AT modem missing portable stty helper"
 grep -q 'gtimeout' lib/at_modem.sh || fail "AT modem missing macOS gtimeout support"

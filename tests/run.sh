@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-python3 -m py_compile lib/pdu_encoder.py lib/cardpulse_web.py scripts/cardpulse-web.py tests/*.py
+python3 -m py_compile lib/pdu_encoder.py lib/pdu_decoder.py lib/cardpulse_web.py scripts/cardpulse-web.py tests/*.py
 python3 tests/check_version.py
 python3 tests/validate_config_schema.py
 python3 tests/test_pdu_encoder.py
