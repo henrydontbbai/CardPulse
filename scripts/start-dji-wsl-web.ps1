@@ -22,12 +22,12 @@ function Invoke-Wsl {
     }
 }
 
-function Invoke-UsbipdAttach {
-    param([string]$TargetBusId)
+function Invoke-Usbipd {
+    param([string[]]$Arguments)
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $output = & usbipd.exe attach --wsl --busid $TargetBusId 2>&1
+        $output = & usbipd.exe @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -35,8 +35,36 @@ function Invoke-UsbipdAttach {
 
     $outputText = ($output | ForEach-Object { $_.ToString() }) -join "`n"
     $output | ForEach-Object { Write-Host $_.ToString() }
-    if ($exitCode -ne 0 -and ($outputText -notmatch "already attached|already|attached|busy|client")) {
-        throw "usbipd attach failed with exit code $exitCode"
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output = $outputText
+    }
+}
+
+function Invoke-UsbipdBind {
+    param([string]$TargetBusId)
+    $listResult = Invoke-Usbipd -Arguments @("list")
+    if ($listResult.ExitCode -ne 0) {
+        throw "usbipd list failed with exit code $($listResult.ExitCode)"
+    }
+
+    $targetLine = $listResult.Output -split "`n" | Where-Object { $_ -match "^\s*$([regex]::Escape($TargetBusId))\s+" } | Select-Object -First 1
+    if ($targetLine -match "\b(Attached|Shared)\b") {
+        Write-Host "usbipd device $TargetBusId is already shared or attached; skipping bind."
+        return
+    }
+
+    $result = Invoke-Usbipd -Arguments @("bind", "--busid", $TargetBusId)
+    if ($result.ExitCode -ne 0 -and ($result.Output -notmatch "already|shared|attached|client|busy")) {
+        throw "usbipd bind failed with exit code $($result.ExitCode). Run this script from an elevated PowerShell once, or run: usbipd bind --busid $TargetBusId"
+    }
+}
+
+function Invoke-UsbipdAttach {
+    param([string]$TargetBusId)
+    $result = Invoke-Usbipd -Arguments @("attach", "--wsl", "--busid", $TargetBusId)
+    if ($result.ExitCode -ne 0 -and ($result.Output -notmatch "already attached|already|attached|busy|client")) {
+        throw "usbipd attach failed with exit code $($result.ExitCode)"
     }
 }
 
@@ -62,7 +90,8 @@ Write-Host "[1/6] Keeping WSL distro alive: $Distro"
 Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $Distro, "--", "bash", "-lc", "while true; do sleep 3600; done") -WindowStyle Hidden
 Start-Sleep -Seconds 1
 
-Write-Host "[2/6] Attaching DJI/Baiwang USB device via usbipd: $BusId"
+Write-Host "[2/6] Sharing and attaching DJI/Baiwang USB device via usbipd: $BusId"
+Invoke-UsbipdBind -TargetBusId $BusId
 Invoke-UsbipdAttach -TargetBusId $BusId
 
 Write-Host "[3/6] Preparing stable CardPulse config in WSL: $configDir"

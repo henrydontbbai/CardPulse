@@ -106,7 +106,11 @@ class WebAPITestCase(unittest.TestCase):
     def test_windows_recovery_script_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("usbipd.exe attach --wsl --busid", script)
+        self.assertIn("usbipd.exe @Arguments", script)
+        self.assertIn('@("list")', script)
+        self.assertIn("skipping bind", script)
+        self.assertIn('"bind", "--busid", $TargetBusId', script)
+        self.assertIn('"attach", "--wsl", "--busid", $TargetBusId', script)
         self.assertIn("scripts/dji-qdc507-wsl-prepare.sh", script)
         self.assertIn("--host $HostBind --port $Port$allowSmsArg", script)
         self.assertIn("SMS test remains disabled", script)
