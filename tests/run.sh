@@ -8,6 +8,7 @@ python3 -m py_compile lib/pdu_encoder.py lib/pdu_decoder.py lib/cardpulse_web.py
 python3 tests/check_version.py
 python3 tests/validate_config_schema.py
 python3 tests/test_pdu_encoder.py
+python3 tests/test_pdu_decoder.py
 python3 tests/test_web_api.py
 bash tests/test_shell_behaviors.sh
 

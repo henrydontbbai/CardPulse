@@ -68,14 +68,22 @@ sms_receive_expect_ok() {
 
 sms_receive_storage_summary() {
     local response="$1"
-    echo "$response" | LC_ALL=C tr -d '\r' | awk '
-        /\+CPMS:/ {
-            if (match($0, /\+CPMS: "([^"]+)",([0-9]+),([0-9]+)/, m)) {
-                status = (m[2] >= m[3] && m[3] > 0) ? " FULL" : ""
-                printf "Storage: %s %s/%s%s\n", m[1], m[2], m[3], status
-            }
-        }
-    '
+    local cpms_re='^\+CPMS: "([^"]+)",([0-9]+),([0-9]+)'
+    local line storage used total status
+    while IFS= read -r line; do
+        line="${line//$'\r'/}"
+        if [[ "$line" =~ $cpms_re ]]; then
+            storage="${BASH_REMATCH[1]}"
+            used="${BASH_REMATCH[2]}"
+            total="${BASH_REMATCH[3]}"
+            status=""
+            if (( used >= total && total > 0 )); then
+                status=" FULL"
+            fi
+            echo "Storage: $storage $used/$total$status"
+            return 0
+        fi
+    done <<< "$response"
 }
 
 sms_receive_status() {

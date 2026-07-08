@@ -294,6 +294,10 @@ if grep -R '\(\([a-zA-Z_][a-zA-Z0-9_]*++\)\)' lib bin scripts >/dev/null; then
     fail "found fragile arithmetic post-increment pattern"
 fi
 
+if grep -R 'match($0' lib bin scripts >/dev/null; then
+    fail "found gawk-only awk match capture array pattern"
+fi
+
 if grep -E "trap .*[[:space:]]RETURN" lib/notifier.sh >/dev/null; then
     fail "notifier should not install RETURN traps for temporary cleanup"
 fi
