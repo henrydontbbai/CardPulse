@@ -251,4 +251,44 @@ grep -q 'at_configure_stty' lib/at_modem.sh || fail "AT modem missing portable s
 grep -q 'gtimeout' lib/at_modem.sh || fail "AT modem missing macOS gtimeout support"
 grep -q '/dev/cu.usbserial\*' lib/at_modem.sh || fail "AT modem missing macOS USB serial detection"
 
+stty_fallback_dir=$(mktemp -d)
+stty_fallback_log="$stty_fallback_dir/stty.log"
+cat > "$stty_fallback_dir/stty" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STTY_FALLBACK_LOG"
+if [[ "$*" == "-F $STTY_FALLBACK_PORT 115200 raw" ]]; then
+    exit 0
+fi
+exit 1
+SH
+chmod +x "$stty_fallback_dir/stty"
+STTY_FALLBACK_PORT="$stty_fallback_dir/fake-tty" \
+STTY_FALLBACK_LOG="$stty_fallback_log" \
+PATH="$stty_fallback_dir:$PATH" \
+bash -c 'source lib/at_modem.sh; at_configure_stty "$STTY_FALLBACK_PORT" 115200' || fail "AT modem should fall back to minimal stty raw mode"
+grep -q -- "-F $stty_fallback_dir/fake-tty 115200 raw -echo -echoe -echok" "$stty_fallback_log" || fail "AT modem did not try full Linux stty first"
+grep -q -- "-F $stty_fallback_dir/fake-tty 115200 raw$" "$stty_fallback_log" || fail "AT modem did not try minimal Linux stty fallback"
+
+stty_skip_dir=$(mktemp -d)
+cat > "$stty_skip_dir/stty" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$stty_skip_dir/stty"
+touch "$stty_skip_dir/fake-tty"
+stty_skip_output=$(
+    STTY_SKIP_PORT="$stty_skip_dir/fake-tty" \
+    PATH="$stty_skip_dir:$PATH" \
+    bash -c 'source lib/at_modem.sh; at_init "$STTY_SKIP_PORT" 115200; rc=$?; at_close; exit "$rc"' 2>&1
+) || fail "AT modem should continue when stty cannot configure a still-openable port"
+if [[ "$stty_skip_output" != *"stty failed"* ]]; then
+    echo "$stty_skip_output" >&2
+    fail "AT modem should warn when continuing after stty failure"
+fi
+
+parsed_info_value=$(printf '\r\nBaiwang\r\n\r\nOK\r\n' | bash -c 'source lib/at_modem.sh; at_first_response_value')
+if [[ "$parsed_info_value" != "Baiwang" ]]; then
+    fail "AT modem should ignore leading blank lines when parsing info responses"
+fi
+
 echo "shell behavior tests ok"

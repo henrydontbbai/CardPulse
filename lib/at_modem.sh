@@ -40,10 +40,21 @@ at_configure_stty() {
     if stty -F "$port" "$baudrate" raw -echo -echoe -echok 2>/dev/null; then
         return 0
     fi
+    if stty -F "$port" "$baudrate" raw 2>/dev/null; then
+        return 0
+    fi
     if stty -f "$port" "$baudrate" raw -echo -echoe -echok 2>/dev/null; then
         return 0
     fi
+    if stty -f "$port" "$baudrate" raw 2>/dev/null; then
+        return 0
+    fi
     return 1
+}
+
+at_open_fd() {
+    local port="$1"
+    exec 3<> "$port"
 }
 
 # 初始化串口
@@ -73,7 +84,7 @@ at_init() {
     fi
 
     # 以独占方式打开串口（获取文件描述符+flock）
-    exec 3<> "$port" 2>/dev/null || {
+    at_open_fd "$port" 2>/dev/null || {
         echo "[ERROR] 无法打开串口: $port" >&2
         return 1
     }
@@ -94,9 +105,7 @@ at_init() {
 
     # 配置串口参数
     if ! at_configure_stty "$port" "$baudrate"; then
-        echo "[ERROR] 无法配置串口: $port" >&2
-        at_close
-        return 1
+        echo "[WARN] stty failed for $port; continuing with existing serial settings" >&2
     fi
 
     # 清空缓冲区（后台 cat，记录 PID 回头清理）
@@ -203,6 +212,18 @@ at_read() {
     fi
     
     at_timeout "$read_timeout" cat "$AT_PORT" 2>/dev/null
+}
+
+at_first_response_value() {
+    LC_ALL=C tr -d '\r' | awk '
+        NF == 0 { next }
+        /^AT/ { next }
+        /^OK$/ { next }
+        /^ERROR$/ { next }
+        /^\+CME ERROR/ { next }
+        /^\+CMS ERROR/ { next }
+        { print; exit }
+    '
 }
 
 # ============================================================================
@@ -649,10 +670,10 @@ at_show_info() {
     local model
     local imei
     local version
-    manufacturer=$(at_send "AT+CGMI" 2 | LC_ALL=C grep -v "^AT" | tr -d '\r' | head -1 || true)
-    model=$(at_send "AT+CGMM" 2 | LC_ALL=C grep -v "^AT" | tr -d '\r' | head -1 || true)
-    imei=$(at_send "AT+CGSN" 2 | LC_ALL=C grep -v "^AT" | tr -d '\r' | head -1 || true)
-    version=$(at_send "AT+CGMR" 2 | LC_ALL=C grep -v "^AT" | tr -d '\r' | head -1 || true)
+    manufacturer=$(at_send "AT+CGMI" 2 | at_first_response_value || true)
+    model=$(at_send "AT+CGMM" 2 | at_first_response_value || true)
+    imei=$(at_send "AT+CGSN" 2 | at_first_response_value || true)
+    version=$(at_send "AT+CGMR" 2 | at_first_response_value || true)
 
     [[ -z "$manufacturer" ]] && manufacturer="(无法获取)"
     [[ -z "$model" ]] && model="(无法获取)"
