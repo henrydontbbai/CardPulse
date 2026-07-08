@@ -251,6 +251,24 @@ cardpulse --doctor
 
 Apple Silicon Mac 可以用 Ubuntu ARM64 虚拟机加 USB 直通验证 DJI 模块；如果 VM 内出现 MBIM/QMI 控制口，再构建 VoHive `linux_arm64` 做只读发现。不要运行现有 `linux_amd64` 二进制，也不要在未授权时发送真实短信。
 
+## CardPulse Web 控制台
+
+CardPulse 现在提供一个轻量本地 Web 控制台，采用和 VoHive 类似的控制模式：浏览器调用本地 HTTP API，本地后端再调用 CardPulse CLI / AT 串口逻辑，网页本身不直接访问 USB。
+
+```bash
+python3 scripts/cardpulse-web.py
+```
+
+默认地址为 `http://127.0.0.1:8765`。在 WSL 中需要从 Windows 浏览器访问时，可以绑定到本地网络接口：
+
+```bash
+python3 scripts/cardpulse-web.py --host 0.0.0.0 --port 8765
+```
+
+Web 控制台默认只提供状态、诊断、设备信息和只读 AT 查询。真实测试短信默认关闭；如需启用，必须启动时显式加 `--allow-sms`，并在页面中二次输入 `SEND_SMS`。
+
+详见 [docs/web-control.md](docs/web-control.md)。
+
 ## License
 
 [MIT](LICENSE)
