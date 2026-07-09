@@ -189,6 +189,32 @@ at_send() {
     echo "$response"
 }
 
+at_response_error_line() {
+    local response="$1"
+    printf '%s' "$response" | LC_ALL=C tr -d '\r' | awk '
+        /^\+CMS ERROR:/ { print; exit }
+        /^\+CME ERROR:/ { print; exit }
+        /^ERROR$/ { print; exit }
+    '
+}
+
+at_response_error_label() {
+    local response="$1"
+    local line
+    line=$(at_response_error_line "$response")
+    if [[ -n "$line" ]]; then
+        echo "$line"
+        return
+    fi
+
+    if [[ -z "$(printf '%s' "$response" | tr -d '\r\n[:space:]')" ]]; then
+        echo "timeout/no response"
+        return
+    fi
+
+    echo "unexpected response"
+}
+
 # 快速发送命令（不等待完整响应）
 at_send_quick() {
     local command="$1"
@@ -366,7 +392,7 @@ at_expect_ok() {
     if echo "$response" | grep -q "OK"; then
         return 0
     fi
-    echo "[ERROR] AT 命令失败: $cmd (响应: $(echo "$response" | tr -d '\r\n'))" >&2
+    echo "[ERROR] AT 命令失败: $cmd ($(at_response_error_label "$response"))" >&2
     return 1
 }
 
@@ -637,26 +663,53 @@ at_send_sms_pdu() {
 
 # 检测串口设备
 # 返回: 第一个找到的 Linux/macOS USB 串口设备
-at_detect_device() {
-    local devices
+at_list_candidate_devices() {
     local pattern
     local device
 
     for pattern in /dev/ttyUSB* /dev/ttyACM* /dev/cu.usbserial* /dev/cu.usbmodem* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART*; do
         for device in $pattern; do
             if [[ -e "$device" ]]; then
-                devices="$device"
-                break 2
+                printf '%s\n' "$device"
             fi
         done
     done
+}
 
-    if [[ -n "$devices" ]]; then
-        echo "$devices"
-        return 0
-    else
+at_probe_device() {
+    local port="$1"
+    local baudrate="${2:-115200}"
+    local result=1
+
+    if ! at_init "$port" "$baudrate" >/dev/null 2>&1; then
         return 1
     fi
+
+    if at_check_modem >/dev/null 2>&1; then
+        result=0
+    fi
+
+    at_close >/dev/null 2>&1 || true
+    return "$result"
+}
+
+at_detect_device() {
+    local device
+    local saw_candidate=false
+    while IFS= read -r device; do
+        [[ -n "$device" ]] || continue
+        saw_candidate=true
+        if at_probe_device "$device" "115200" >/dev/null 2>&1; then
+            echo "$device"
+            return 0
+        fi
+    done < <(at_list_candidate_devices)
+
+    if [[ "$saw_candidate" == "true" ]]; then
+        return 1
+    fi
+
+    return 1
 }
 
 # 显示模组信息

@@ -220,6 +220,90 @@ if [[ "$auto_detect_output" != "/tmp/cardpulse-fake-serial" ]]; then
     fail "sms_detect_device should accept Python YAML boolean True"
 fi
 
+auto_detect_probe_output=$(
+    source lib/config_reader.sh
+    source lib/at_modem.sh
+    source lib/sms_sender.sh
+    config_read() {
+        case "$1" in
+          .serial.port) echo "" ;;
+          .serial.auto_detect) echo "true" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    at_list_candidate_devices() {
+        printf '%s\n' "/tmp/cardpulse-tty-miss" "/tmp/cardpulse-tty-hit"
+    }
+    at_probe_device() {
+        [[ "$1" == "/tmp/cardpulse-tty-hit" ]]
+    }
+    sms_detect_device
+)
+if [[ "$auto_detect_probe_output" != "/tmp/cardpulse-tty-hit" ]]; then
+    fail "sms_detect_device should prefer a candidate that answers AT"
+fi
+
+auto_detect_no_probe_output=$(
+    source lib/config_reader.sh
+    source lib/at_modem.sh
+    source lib/sms_sender.sh
+    config_read() {
+        case "$1" in
+          .serial.port) echo "" ;;
+          .serial.auto_detect) echo "true" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    at_list_candidate_devices() {
+        printf '%s\n' "/tmp/cardpulse-tty-miss-a" "/tmp/cardpulse-tty-miss-b"
+    }
+    at_probe_device() {
+        return 1
+    }
+    sms_detect_device || true
+)
+if [[ -n "$auto_detect_no_probe_output" ]]; then
+    echo "$auto_detect_no_probe_output" >&2
+    fail "sms_detect_device should fail when candidates exist but none answer AT"
+fi
+
+status_root=$(mktemp -d)
+mkdir -p "$status_root/state"
+printf '%s\n' "$(( $(date +%s) - 86400 ))" > "$status_root/state/last_success"
+printf '2026-07-09 11:02:03\n' > "$status_root/state/last_success_date"
+printf '%s|2026-07-09 11:02:03|success\n' "$(date +%s)" > "$status_root/state/history.log"
+status_output=$(
+    source lib/config_reader.sh
+    source lib/state_manager.sh
+    CONFIG_DIR="$status_root"
+    CONFIG_FILE="$status_root/config.yaml"
+    STATE_DIR="$status_root/state"
+    config_read() {
+        case "$1" in
+          .sms.interval_days) echo "179" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    state_show_status
+)
+if [[ "$status_output" != *"Last send:"* || "$status_output" != *"Send due: no"* || "$status_output" != *"Next send:"* || "$status_output" != *"Last result: success"* ]]; then
+    echo "$status_output" >&2
+    fail "status output should expose stable schedule summary fields"
+fi
+
+custom_state_root=$(mktemp -d)
+mkdir -p "$custom_state_root/custom-state"
+printf '1234567890\n' > "$custom_state_root/custom-state/last_success"
+custom_state_output=$(
+    export CARDPULSE_STATE_DIR="$custom_state_root/custom-state"
+    source lib/state_manager.sh
+    state_get_last_success
+)
+if [[ "$custom_state_output" != "1234567890" ]]; then
+    echo "$custom_state_output" >&2
+    fail "state manager should respect CARDPULSE_STATE_DIR override"
+fi
+
 sms_status_output=$(
     source lib/sms_receiver.sh
     at_send() {
@@ -268,6 +352,198 @@ sms_read_output=$(
 if [[ "$sms_read_output" != *"Index: 1"* || "$sms_read_output" != *"Message: OK"* ]]; then
     echo "$sms_read_output" >&2
     fail "sms read should decode one PDU message"
+fi
+
+concat_pdus=$(
+python3 - <<'PY'
+import math
+
+GSM_7BIT = (
+    "@", "\u00a3", "$", "\u00a5", "\u00e8", "\u00e9", "\u00f9", "\u00ec",
+    "\u00f2", "\u00c7", "\n", "\u00d8", "\u00f8", "\r", "\u00c5", "\u00e5",
+    "\u0394", "_", "\u03a6", "\u0393", "\u039b", "\u03a9", "\u03a0", "\u03a8",
+    "\u03a3", "\u0398", "\u039e", None, "\u00c6", "\u00e6", "\u00df", "\u00c9",
+    " ", "!", '"', "#", "\u00a4", "%", "&", "'",
+    "(", ")", "*", "+", ",", "-", ".", "/",
+    "0", "1", "2", "3", "4", "5", "6", "7",
+    "8", "9", ":", ";", "<", "=", ">", "?",
+    "\u00a1", "A", "B", "C", "D", "E", "F", "G",
+    "H", "I", "J", "K", "L", "M", "N", "O",
+    "P", "Q", "R", "S", "T", "U", "V", "W",
+    "X", "Y", "Z", "\u00c4", "\u00d6", "\u00d1", "\u00dc", "\u00a7",
+    "\u00bf", "a", "b", "c", "d", "e", "f", "g",
+    "h", "i", "j", "k", "l", "m", "n", "o",
+    "p", "q", "r", "s", "t", "u", "v", "w",
+    "x", "y", "z", "\u00e4", "\u00f6", "\u00f1", "\u00fc", "\u00e0",
+)
+GSM_EXT = {"^": 0x14, "{": 0x28, "}": 0x29, "\\": 0x2F, "[": 0x3C, "~": 0x3D, "]": 0x3E, "|": 0x40, "\u20ac": 0x65}
+CHAR_TO_GSM = {}
+for idx, ch in enumerate(GSM_7BIT):
+    if ch is not None:
+        CHAR_TO_GSM[ch] = (idx, False)
+for ch, idx in GSM_EXT.items():
+    CHAR_TO_GSM[ch] = (idx, True)
+
+def swap_digits(value):
+    if len(value) % 2:
+        value += "F"
+    return "".join(value[i + 1] + value[i] for i in range(0, len(value), 2))
+
+def gsm7_septets(text):
+    result = []
+    for ch in text:
+        idx, is_ext = CHAR_TO_GSM[ch]
+        if is_ext:
+            result.append(0x1B)
+        result.append(idx)
+    return result
+
+def pack_septets(septets, skip_bits=0, prefix_bytes=b""):
+    total_bits = skip_bits + len(septets) * 7
+    out = bytearray(max(len(prefix_bytes), math.ceil(total_bits / 8)))
+    for i, octet in enumerate(prefix_bytes):
+        out[i] = octet
+    bit_pos = skip_bits
+    for septet in septets:
+        for bit_index in range(7):
+            if septet & (1 << bit_index):
+                absolute = bit_pos + bit_index
+                out[absolute // 8] |= 1 << (absolute % 8)
+        bit_pos += 7
+    return bytes(out)
+
+def build_part(text, seq):
+    sender = "12345678901"
+    udh = bytes([0x05, 0x00, 0x03, 0x07, 0x02, seq])
+    septets = gsm7_septets(text)
+    header_septets = math.ceil(len(udh) * 8 / 7)
+    payload = pack_septets(septets, skip_bits=header_septets * 7, prefix_bytes=udh)
+    udl = header_septets + len(septets)
+    print(
+        "00"
+        "44"
+        f"{len(sender):02X}"
+        "91"
+        f"{swap_digits(sender)}"
+        "00"
+        "00"
+        "62708021436500"
+        f"{udl:02X}"
+        f"{payload.hex().upper()}"
+    )
+
+build_part("Hello ", 1)
+build_part("world", 2)
+PY
+)
+concat_pdu_1=$(printf '%s\n' "$concat_pdus" | sed -n '1p')
+concat_pdu_2=$(printf '%s\n' "$concat_pdus" | sed -n '2p')
+sms_concat_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CMGF=0") printf '\r\nOK\r\n' ;;
+          "AT+CMGL=4") printf '\r\n+CMGL: 1,0,,32\r\n%s\r\n+CMGL: 2,0,,31\r\n%s\r\n\r\nOK\r\n' "$concat_pdu_1" "$concat_pdu_2" ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_list
+)
+if [[ "$sms_concat_output" != *"Indexes: 1,2"* || "$sms_concat_output" != *"Parts: 2/2"* || "$sms_concat_output" != *"Preview: Hello world"* ]]; then
+    echo "$sms_concat_output" >&2
+    fail "sms inbox should merge concatenated PDU parts within one listing"
+fi
+if [[ "$sms_concat_output" != *"Status: REC UNREAD"* ]]; then
+    echo "$sms_concat_output" >&2
+    fail "sms inbox should keep grouped status labels human-readable"
+fi
+
+concat_pdus_different_time=$(
+python3 - <<'PY'
+import math
+
+GSM_7BIT = (
+    "@", "\u00a3", "$", "\u00a5", "\u00e8", "\u00e9", "\u00f9", "\u00ec",
+    "\u00f2", "\u00c7", "\n", "\u00d8", "\u00f8", "\r", "\u00c5", "\u00e5",
+    "\u0394", "_", "\u03a6", "\u0393", "\u039b", "\u03a9", "\u03a0", "\u03a8",
+    "\u03a3", "\u0398", "\u039e", None, "\u00c6", "\u00e6", "\u00df", "\u00c9",
+    " ", "!", '"', "#", "\u00a4", "%", "&", "'",
+    "(", ")", "*", "+", ",", "-", ".", "/",
+    "0", "1", "2", "3", "4", "5", "6", "7",
+    "8", "9", ":", ";", "<", "=", ">", "?",
+    "\u00a1", "A", "B", "C", "D", "E", "F", "G",
+    "H", "I", "J", "K", "L", "M", "N", "O",
+    "P", "Q", "R", "S", "T", "U", "V", "W",
+    "X", "Y", "Z", "\u00c4", "\u00d6", "\u00d1", "\u00dc", "\u00a7",
+    "\u00bf", "a", "b", "c", "d", "e", "f", "g",
+    "h", "i", "j", "k", "l", "m", "n", "o",
+    "p", "q", "r", "s", "t", "u", "v", "w",
+    "x", "y", "z", "\u00e4", "\u00f6", "\u00f1", "\u00fc", "\u00e0",
+)
+CHAR_TO_GSM = {ch: (idx, False) for idx, ch in enumerate(GSM_7BIT) if ch is not None}
+
+def swap_digits(value):
+    if len(value) % 2:
+        value += "F"
+    return "".join(value[i + 1] + value[i] for i in range(0, len(value), 2))
+
+def gsm7_septets(text):
+    return [CHAR_TO_GSM[ch][0] for ch in text]
+
+def pack_septets(septets, skip_bits=0, prefix_bytes=b""):
+    total_bits = skip_bits + len(septets) * 7
+    out = bytearray(max(len(prefix_bytes), math.ceil(total_bits / 8)))
+    for i, octet in enumerate(prefix_bytes):
+        out[i] = octet
+    bit_pos = skip_bits
+    for septet in septets:
+        for bit_index in range(7):
+            if septet & (1 << bit_index):
+                absolute = bit_pos + bit_index
+                out[absolute // 8] |= 1 << (absolute % 8)
+        bit_pos += 7
+    return bytes(out)
+
+def build_part(text, seq, timestamp):
+    sender = "12345678901"
+    udh = bytes([0x05, 0x00, 0x03, 0x07, 0x02, seq])
+    septets = gsm7_septets(text)
+    header_septets = math.ceil(len(udh) * 8 / 7)
+    payload = pack_septets(septets, skip_bits=header_septets * 7, prefix_bytes=udh)
+    udl = header_septets + len(septets)
+    print(
+        "00"
+        "44"
+        f"{len(sender):02X}"
+        "91"
+        f"{swap_digits(sender)}"
+        "00"
+        "00"
+        f"{timestamp}"
+        f"{udl:02X}"
+        f"{payload.hex().upper()}"
+    )
+
+build_part("Hello ", 1, "62708021436500")
+build_part("world", 2, "62708021437500")
+PY
+)
+concat_time_pdu_1=$(printf '%s\n' "$concat_pdus_different_time" | sed -n '1p')
+concat_time_pdu_2=$(printf '%s\n' "$concat_pdus_different_time" | sed -n '2p')
+sms_concat_time_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CMGF=0") printf '\r\nOK\r\n' ;;
+          "AT+CMGL=4") printf '\r\n+CMGL: 3,0,,32\r\n%s\r\n+CMGL: 4,0,,31\r\n%s\r\n\r\nOK\r\n' "$concat_time_pdu_1" "$concat_time_pdu_2" ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_list
+)
+if [[ "$sms_concat_time_output" != *"Indexes: 3,4"* || "$sms_concat_time_output" != *"Preview: Hello world"* ]]; then
+    echo "$sms_concat_time_output" >&2
+    fail "sms inbox should merge concatenated SMS parts even if modem timestamps differ"
 fi
 
 delete_missing_confirm_output=$(bash bin/cardpulse --delete-sms 1 2>&1 || true)

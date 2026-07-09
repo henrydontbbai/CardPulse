@@ -14,51 +14,37 @@
       --text: #1f261f;
       --muted: #637064;
       --accent: #1d7a59;
-      --accent-2: #245c88;
       --warn: #a25d13;
       --danger: #b13b3b;
       --shadow: 0 10px 30px rgba(31, 38, 31, .08);
     }
 
-    * {
-      box-sizing: border-box;
-    }
-
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: 15px;
-      letter-spacing: 0;
     }
-
-    button,
-    input,
-    select {
-      font: inherit;
-      letter-spacing: 0;
-    }
+    button, input, select { font: inherit; }
 
     .shell {
       min-height: 100vh;
       display: grid;
       grid-template-columns: 260px minmax(0, 1fr);
     }
-
     aside {
       border-right: 1px solid var(--line);
       background: #fbfcf8;
       padding: 22px;
     }
-
     .brand {
       display: flex;
       align-items: center;
       gap: 10px;
       margin-bottom: 28px;
     }
-
     .mark {
       width: 32px;
       height: 32px;
@@ -69,18 +55,8 @@
       place-items: center;
       font-weight: 700;
     }
-
-    h1 {
-      font-size: 18px;
-      margin: 0;
-      line-height: 1.2;
-    }
-
-    .nav {
-      display: grid;
-      gap: 8px;
-    }
-
+    h1 { font-size: 18px; margin: 0; line-height: 1.2; }
+    .nav { display: grid; gap: 8px; }
     .nav button {
       border: 1px solid transparent;
       background: transparent;
@@ -90,18 +66,12 @@
       border-radius: 8px;
       cursor: pointer;
     }
-
     .nav button.active {
       background: var(--panel-2);
       color: var(--text);
       border-color: var(--line);
     }
-
-    main {
-      padding: 26px;
-      min-width: 0;
-    }
-
+    main { padding: 26px; min-width: 0; }
     .topbar {
       display: flex;
       align-items: center;
@@ -109,23 +79,14 @@
       gap: 16px;
       margin-bottom: 20px;
     }
-
-    .topbar h2 {
-      margin: 0;
-      font-size: 24px;
-      line-height: 1.2;
-    }
-
+    .topbar h2 { margin: 0; font-size: 24px; line-height: 1.2; }
     .actions {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
       justify-content: flex-end;
     }
-
-    button.primary,
-    button.secondary,
-    button.danger {
+    button.primary, button.secondary, button.danger {
       min-height: 38px;
       border-radius: 8px;
       border: 1px solid var(--line);
@@ -134,22 +95,16 @@
       background: #fff;
       color: var(--text);
     }
-
     button.primary {
       border-color: var(--accent);
       background: var(--accent);
       color: #fff;
     }
-
     button.danger {
       border-color: #e5b4b4;
       color: var(--danger);
     }
-
-    button:disabled {
-      opacity: .55;
-      cursor: not-allowed;
-    }
+    button:disabled { opacity: .55; cursor: not-allowed; }
 
     .grid {
       display: grid;
@@ -157,7 +112,6 @@
       gap: 14px;
       margin-bottom: 16px;
     }
-
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -166,44 +120,30 @@
       padding: 16px;
       min-width: 0;
     }
-
     .metric {
       display: grid;
       gap: 6px;
       min-height: 90px;
     }
-
     .metric label {
       color: var(--muted);
       font-size: 12px;
       text-transform: uppercase;
     }
-
     .metric strong {
       font-size: 22px;
       line-height: 1.1;
       overflow-wrap: anywhere;
     }
-
-    .wide {
-      grid-column: span 2;
-    }
-
-    .section {
-      display: none;
-    }
-
-    .section.active {
-      display: block;
-    }
-
+    .wide { grid-column: span 2; }
+    .section { display: none; }
+    .section.active { display: block; }
     .status-line {
       min-height: 24px;
       color: var(--muted);
       margin-bottom: 12px;
       overflow-wrap: anywhere;
     }
-
     .raw {
       margin: 0;
       padding: 14px;
@@ -220,16 +160,13 @@
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
-
     .form-row {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
       margin-bottom: 12px;
     }
-
-    input,
-    select {
+    input, select {
       min-height: 38px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -237,13 +174,11 @@
       color: var(--text);
       padding: 0 12px;
     }
-
     input.command {
       flex: 1 1 260px;
       min-width: 0;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
-
     .badge {
       display: inline-flex;
       align-items: center;
@@ -255,56 +190,28 @@
       border: 1px solid var(--line);
       font-size: 13px;
     }
-
-    .badge.ok {
-      color: var(--accent);
-    }
-
-    .badge.warn {
-      color: var(--warn);
-    }
+    .badge.ok { color: var(--accent); }
+    .badge.warn { color: var(--warn); }
+    .badge.danger { color: var(--danger); }
 
     @media (max-width: 900px) {
-      .shell {
-        grid-template-columns: 1fr;
-      }
-
+      .shell { grid-template-columns: 1fr; }
       aside {
         border-right: 0;
         border-bottom: 1px solid var(--line);
       }
-
-      .grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
-
     @media (max-width: 560px) {
-      main,
-      aside {
-        padding: 16px;
-      }
-
+      main, aside { padding: 16px; }
       .topbar {
         align-items: stretch;
         flex-direction: column;
       }
-
-      .actions {
-        justify-content: stretch;
-      }
-
-      .actions button {
-        flex: 1 1 130px;
-      }
-
-      .grid {
-        grid-template-columns: 1fr;
-      }
-
-      .wide {
-        grid-column: span 1;
-      }
+      .actions { justify-content: stretch; }
+      .actions button { flex: 1 1 130px; }
+      .grid { grid-template-columns: 1fr; }
+      .wide { grid-column: span 1; }
     }
   </style>
 </head>
@@ -318,9 +225,9 @@
       <nav class="nav" aria-label="视图">
         <button class="active" data-view="overview">设备概览</button>
         <button data-view="doctor">硬件诊断</button>
-        <button data-view="terminal">AT 控制台</button>
+        <button data-view="terminal">只读 AT 控制台</button>
         <button data-view="sms">测试短信</button>
-        <button data-view="inbox">收件箱</button>
+        <button data-view="inbox">短信收件箱</button>
       </nav>
     </aside>
 
@@ -329,8 +236,9 @@
         <div class="topbar">
           <h2>设备概览</h2>
           <div class="actions">
-            <button class="secondary" id="refresh-status">刷新状态</button>
-            <button class="primary" id="refresh-info">刷新信息</button>
+            <button class="secondary" id="refresh-overview">刷新概览状态</button>
+            <button class="secondary" id="refresh-info">刷新模组信息</button>
+            <button class="secondary" id="refresh-sms-summary">刷新短信状态</button>
           </div>
         </div>
         <div class="grid">
@@ -340,6 +248,8 @@
           <div class="panel metric"><label>运营商</label><strong id="operator">-</strong></div>
           <div class="panel metric wide"><label>设备端口</label><strong id="device">-</strong></div>
           <div class="panel metric wide"><label>IMEI</label><strong id="imei">-</strong></div>
+          <div class="panel metric wide"><label>最近发送</label><strong id="last-send">-</strong></div>
+          <div class="panel metric wide"><label>下次发送</label><strong id="next-send">-</strong></div>
         </div>
         <div class="panel">
           <div class="status-line" id="overview-status"></div>
@@ -351,7 +261,7 @@
         <div class="topbar">
           <h2>硬件诊断</h2>
           <div class="actions">
-            <button class="primary" id="run-doctor">运行诊断</button>
+            <button class="primary" id="run-doctor">运行硬件诊断</button>
           </div>
         </div>
         <div class="panel">
@@ -373,7 +283,7 @@
               <option value="5" selected>5s</option>
               <option value="10">10s</option>
             </select>
-            <button class="primary" id="send-at">发送</button>
+            <button class="primary" id="send-at">发送查询</button>
           </div>
           <div class="status-line" id="at-status"></div>
           <pre class="raw" id="at-output"></pre>
@@ -433,7 +343,6 @@
     async function api(path, options = {}, timeoutMs = 25000) {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-
       try {
         const response = await fetch(path, {
           headers: {"Content-Type": "application/json"},
@@ -516,48 +425,99 @@
     }
 
     function setMetric(id, value) {
-      if (value && value !== "-") {
-        $(id).textContent = value;
-      }
+      $(id).textContent = value && value !== "-" ? value : "-";
     }
 
-    function applyParsed(parsed) {
-      if (!parsed) return;
-      setMetric("sim", parsed.sim || parsed["sim_卡"]);
-      setMetric("rssi", parsed.rssi || parsed["信号强度"]);
-      setMetric("network", parsed.network_registration || parsed["网络状态"]);
-      setMetric("operator", parsed.operator || parsed["运营商"]);
-      setMetric("device", parsed.device || parsed["设备"]);
-      setMetric("imei", parsed.imei);
+    function applyInfo(data) {
+      setMetric("sim", data.sim);
+      setMetric("rssi", data.signal);
+      setMetric("network", data.network);
+      setMetric("operator", data.operator);
+      setMetric("device", data.device);
+      setMetric("imei", data.imei);
+    }
+
+    function applyStatus(data) {
+      setMetric("last-send", data.last_send);
+      setMetric("next-send", data.next_send);
     }
 
     async function refreshDoctor(targetStatus = "doctor-status", targetOutput = "doctor-output") {
-      setStatus(targetStatus, "诊断中...", true);
+      setStatus(targetStatus, "正在运行硬件诊断", true);
       setRaw(targetOutput, {output: "正在运行硬件诊断..."});
-      const data = await api("/api/doctor");
+      const data = await api("/api/doctor", {}, 45000);
       setRaw(targetOutput, data);
-      applyParsed(data.parsed);
-      setStatus(targetStatus, data.ok ? "诊断通过" : "诊断返回警告", data.ok);
+      setStatus(targetStatus, data.ok ? "诊断已完成" : (data.message || "诊断失败"), data.ok);
       return data;
     }
 
     async function refreshInfo() {
-      setStatus("overview-status", "正在读取模块...", true);
-      setRaw("overview-output", {output: "正在读取模块信息..."});
-      const data = await api("/api/info");
-      setRaw("overview-output", data);
-      applyParsed(data.parsed);
-      setStatus("overview-status", data.ok ? "信息已刷新" : "信息读取失败", data.ok);
+      setStatus("overview-status", "正在读取模组信息", true);
+      const data = await api("/api/info", {}, 35000);
+      if (data.ok) {
+        applyInfo(data);
+      }
       return data;
     }
 
-    $("refresh-status").addEventListener("click", () => refreshDoctor("overview-status", "overview-output"));
-    $("refresh-info").addEventListener("click", refreshInfo);
+    async function refreshStatus() {
+      const data = await api("/api/status");
+      if (data.ok) {
+        applyStatus(data);
+      }
+      return data;
+    }
+
+    async function refreshSmsSummary() {
+      const data = await api("/api/sms/status");
+      return data;
+    }
+
+    async function refreshOverview() {
+      setStatus("overview-status", "正在读取概览状态", true);
+      setRaw("overview-output", {output: "正在读取概览状态..."});
+      const [statusData, infoData, smsData] = await Promise.all([
+        refreshStatus(),
+        refreshInfo(),
+        refreshSmsSummary()
+      ]);
+      const rawBlocks = [];
+      if (statusData.output) rawBlocks.push(`=== 发送状态 ===\n${statusData.output}`);
+      if (infoData.output) rawBlocks.push(`=== 模组信息 ===\n${infoData.output}`);
+      if (smsData.output) rawBlocks.push(`=== 短信状态 ===\n${smsData.output}`);
+      setRaw("overview-output", {output: rawBlocks.join("\n\n")});
+
+      const smsAdvice = smsStorageAdvice(smsData.parsed);
+      if (!statusData.ok || !infoData.ok || !smsData.ok) {
+        setStatus("overview-status", "概览读取失败，请查看下方原始输出。", false);
+      } else if (smsAdvice && smsAdvice.level !== "ok") {
+        setStatusLevel("overview-status", smsAdvice.text, smsAdvice.level);
+      } else {
+        setStatus("overview-status", "概览状态已刷新，可直接判断设备、SIM、网络与短信存储状态。", true);
+      }
+    }
+
+    $("refresh-overview").addEventListener("click", refreshOverview);
+    $("refresh-info").addEventListener("click", async () => {
+      const data = await refreshInfo();
+      setRaw("overview-output", data);
+      setStatus("overview-status", data.ok ? "模组信息已刷新" : (data.message || "模组信息读取失败"), data.ok);
+    });
+    $("refresh-sms-summary").addEventListener("click", async () => {
+      const data = await refreshSmsSummary();
+      setRaw("overview-output", data);
+      const advice = smsStorageAdvice(data.parsed);
+      if (data.ok && advice) {
+        setStatusLevel("overview-status", advice.text, advice.level);
+      } else {
+        setStatus("overview-status", data.ok ? "短信状态已刷新" : (data.message || "短信状态读取失败"), data.ok);
+      }
+    });
     $("run-doctor").addEventListener("click", () => refreshDoctor());
 
     $("send-at").addEventListener("click", async () => {
-      setStatus("at-status", "正在发送...", true);
-      setRaw("at-output", {output: "正在发送只读 AT 命令..."});
+      setStatus("at-status", "正在发送查询", true);
+      setRaw("at-output", {output: "正在发送只读 AT 查询..."});
       const data = await api("/api/at", {
         method: "POST",
         body: JSON.stringify({
@@ -566,20 +526,23 @@
         })
       });
       setRaw("at-output", data);
-      setStatus("at-status", data.ok ? "命令已完成" : data.message || "命令失败", data.ok);
+      setStatus("at-status", data.ok ? "查询已完成" : (data.message || "查询失败"), data.ok);
     });
 
     $("send-test-sms").addEventListener("click", async () => {
       if (!window.confirm("将使用当前 CardPulse 配置发送一条真实短信，是否继续？")) return;
       const token = window.prompt("请输入 SEND_SMS 进行二次确认");
-      setStatus("sms-status", "正在发送...", true);
+      setStatus("sms-status", "正在发送测试短信", true);
       setRaw("sms-output", {output: "正在执行短信测试命令..."});
       const data = await api("/api/actions/test-sms", {
         method: "POST",
         body: JSON.stringify({confirm: token || ""})
       });
       setRaw("sms-output", data);
-      setStatus("sms-status", data.ok ? "短信命令已完成" : data.message || "短信命令失败", data.ok);
+      setStatus("sms-status", data.ok ? "短信命令已完成" : (data.message || "短信命令失败"), data.ok);
+      if (data.ok) {
+        await refreshOverview();
+      }
     });
 
     function smsIndex() {
@@ -587,7 +550,7 @@
     }
 
     $("refresh-sms-status").addEventListener("click", async () => {
-      setStatus("inbox-status", "正在读取短信存储状态...", true);
+      setStatus("inbox-status", "正在读取短信存储状态", true);
       setRaw("inbox-output", {output: "正在查询 AT+CPMS / AT+CNMI 状态..."});
       const data = await api("/api/sms/status");
       setRaw("inbox-output", data);
@@ -595,16 +558,18 @@
       if (data.ok && advice) {
         setStatusLevel("inbox-status", advice.text, advice.level);
       } else {
-        setStatus("inbox-status", data.ok ? "短信存储状态已刷新" : data.message || "读取失败", data.ok);
+        setStatus("inbox-status", data.ok ? "短信存储状态已刷新" : (data.message || "读取失败"), data.ok);
       }
+      await refreshOverview();
     });
 
     $("refresh-inbox").addEventListener("click", async () => {
-      setStatus("inbox-status", "正在读取收件箱...", true);
+      setStatus("inbox-status", "正在读取收件箱", true);
       setRaw("inbox-output", {output: "正在读取短信列表；未读短信可能被模块标记为已读，但不会删除。"});
       const data = await api("/api/sms/inbox", {}, 45000);
       setRaw("inbox-output", data);
-      setStatus("inbox-status", data.ok ? "收件箱已刷新" : data.message || "读取失败", data.ok);
+      setStatus("inbox-status", data.ok ? "收件箱已刷新" : (data.message || "读取失败"), data.ok);
+      await refreshOverview();
     });
 
     $("read-sms").addEventListener("click", async () => {
@@ -612,7 +577,8 @@
       setStatus("inbox-status", `正在读取短信 ${index}...`, true);
       const data = await api(`/api/sms/messages/${encodeURIComponent(index)}`);
       setRaw("inbox-output", data);
-      setStatus("inbox-status", data.ok ? "短信已读取" : data.message || "读取失败", data.ok);
+      setStatus("inbox-status", data.ok ? "短信已读取" : (data.message || "读取失败"), data.ok);
+      await refreshOverview();
     });
 
     $("delete-sms").addEventListener("click", async () => {
@@ -625,7 +591,8 @@
         body: JSON.stringify({index, confirm: token || ""})
       });
       setRaw("inbox-output", data);
-      setStatus("inbox-status", data.ok ? "短信已删除" : data.message || "删除失败", data.ok);
+      setStatus("inbox-status", data.ok ? "短信已删除" : (data.message || "删除失败"), data.ok);
+      await refreshOverview();
     });
 
     async function boot() {
@@ -633,9 +600,7 @@
       $("sms-gate").textContent = health.sms_enabled ? "已启用" : "短信测试默认关闭";
       $("sms-gate").classList.toggle("ok", health.sms_enabled);
       $("send-test-sms").disabled = !health.sms_enabled;
-      setRaw("overview-output", {output: "正在读取硬件状态..."});
-      await refreshDoctor("overview-status", "overview-output");
-      await refreshInfo();
+      await refreshOverview();
     }
 
     boot().catch((error) => {

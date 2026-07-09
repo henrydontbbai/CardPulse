@@ -53,6 +53,20 @@ sms_receive_json_field() {
     printf '%s' "$json" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get(sys.argv[1], ""))' "$field"
 }
 
+sms_receive_json_array_field() {
+    local json="$1"
+    local field="$2"
+    printf '%s' "$json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+value = data.get(sys.argv[1], [])
+if isinstance(value, list):
+    print(",".join(str(item) for item in value))
+else:
+    print(value if value is not None else "")
+' "$field"
+}
+
 sms_receive_expect_ok() {
     local cmd="$1"
     local timeout="${2:-5}"
@@ -134,12 +148,46 @@ sms_receive_print_entry() {
     echo ""
 }
 
+sms_receive_flush_concat_groups() {
+    local groups_json="$1"
+    if [[ -z "$groups_json" || "$groups_json" == "{}" ]]; then
+        return 0
+    fi
+
+    GROUPS_JSON="$groups_json" python3 - <<'PY'
+import json
+import os
+
+groups = json.loads(os.environ["GROUPS_JSON"])
+for key in sorted(groups):
+    group = groups[key]
+    parts = sorted(group["parts"], key=lambda item: item["seq"])
+    preview = "".join(part["text"] for part in parts)
+    print(f"Indexes: {','.join(part['index'] for part in parts)}")
+    status = group["status"]
+    label = {
+        "0": "REC UNREAD",
+        "1": "REC READ",
+        "2": "STO UNSENT",
+        "3": "STO SENT",
+        "4": "ALL",
+    }.get(str(status), "UNKNOWN")
+    print(f"Status: {label}")
+    print(f"From: {group['sender']}")
+    print(f"Time: {group['timestamp']}")
+    print(f"Parts: {len(parts)}/{group['total']}")
+    print(f"Preview: {preview}")
+    print()
+PY
+}
+
 sms_receive_list() {
     sms_receive_expect_ok "AT+CMGF=0" 5 || return 1
     local response
     response=$(at_send "AT+CMGL=4" 15)
     echo "=== SMS inbox ==="
     local index="" status="" found=false line
+    local concat_groups='{}'
     while IFS= read -r line; do
         line="${line//$'\r'/}"
         if [[ "$line" =~ ^\+CMGL:\ ([0-9]+),([0-9]+) ]]; then
@@ -148,12 +196,52 @@ sms_receive_list() {
             continue
         fi
         if [[ -n "$index" && "$line" =~ ^[0-9A-Fa-f]+$ ]]; then
-            sms_receive_print_entry "$index" "$status" "$line"
+            local decoded
+            local ok
+            local concat_ref
+            local concat_total
+            local concat_seq
+            decoded=$(sms_receive_decode_pdu "$line")
+            ok=$(sms_receive_json_field "$decoded" ok)
+            concat_ref=$(sms_receive_json_field "$decoded" concat_ref)
+            concat_total=$(sms_receive_json_field "$decoded" concat_total)
+            concat_seq=$(sms_receive_json_field "$decoded" concat_seq)
+
+            if [[ ( "$ok" == "True" || "$ok" == "true" ) && -n "$concat_ref" && -n "$concat_total" && -n "$concat_seq" ]]; then
+                concat_groups=$(GROUPS_JSON="$concat_groups" ENTRY_JSON="$decoded" ENTRY_INDEX="$index" ENTRY_STATUS="$status" python3 - <<'PY'
+import json
+import os
+
+groups = json.loads(os.environ["GROUPS_JSON"])
+entry = json.loads(os.environ["ENTRY_JSON"])
+group_key = f"{entry.get('sender','UNKNOWN')}|{entry.get('concat_ref','')}|{entry.get('concat_total','')}"
+group = groups.setdefault(group_key, {
+    "sender": entry.get("sender", "UNKNOWN"),
+    "timestamp": entry.get("timestamp", "UNKNOWN"),
+    "status": os.environ["ENTRY_STATUS"],
+    "total": int(entry.get("concat_total") or 0),
+    "parts": [],
+})
+current_timestamp = entry.get("timestamp", "UNKNOWN")
+if group["timestamp"] == "UNKNOWN" or (current_timestamp and current_timestamp < group["timestamp"]):
+    group["timestamp"] = current_timestamp
+group["parts"].append({
+    "index": os.environ["ENTRY_INDEX"],
+    "seq": int(entry.get("concat_seq") or 0),
+    "text": entry.get("text", ""),
+})
+print(json.dumps(groups, ensure_ascii=False))
+PY
+)
+            else
+                sms_receive_print_entry "$index" "$status" "$line"
+            fi
             found=true
             index=""
             status=""
         fi
     done <<< "$response"
+    sms_receive_flush_concat_groups "$concat_groups"
     if [[ "$found" != "true" ]]; then
         echo "No SMS messages found."
     fi

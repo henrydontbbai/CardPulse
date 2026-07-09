@@ -22,22 +22,51 @@ class FakeRunner:
 
     def run_cardpulse(self, args):
         self.commands.append(list(args))
+        if args == ["--doctor"]:
+            return cardpulse_web.CommandResult(
+                0,
+                "=== CardPulse doctor ===\n"
+                "AT: OK\n"
+                "SIM: READY\n"
+                "RSSI: 21\n"
+                "Network registration: 5\n"
+                "Operator: CHINA MOBILE\n",
+                "",
+            )
         if args == ["--info"]:
             return cardpulse_web.CommandResult(
                 0,
-                "\u8bbe\u5907: /dev/ttyUSB2\n"
-                "\u6ce2\u7279\u7387: 115200\n"
-                "\u5382\u5546: Baiwang\n"
-                "\u578b\u53f7: QDC507\n"
+                "设备: /dev/ttyUSB2\n"
+                "波特率: 115200\n"
+                "厂商: Baiwang\n"
+                "型号: QDC507\n"
                 "IMEI: 863212060375703\n"
-                "SIM \u5361: READY\n"
-                "\u4fe1\u53f7\u5f3a\u5ea6: 21\n"
-                "\u7f51\u7edc\u72b6\u6001: 5\n"
-                "\u8fd0\u8425\u5546: CHINA MOBILE\n",
+                "SIM 卡: READY\n"
+                "信号强度: 21\n"
+                "网络状态: 5\n"
+                "运营商: CHINA MOBILE\n",
+                "",
+            )
+        if args == ["--status"]:
+            return cardpulse_web.CommandResult(
+                0,
+                "Last send: 2026-07-09 11:02:03\n"
+                "Days since last send: 0\n"
+                "Interval days: 179\n"
+                "Remaining days: 179\n"
+                "Send due: no\n"
+                "Next send: 2027-01-04 11:02:03\n"
+                "Last result: success\n",
                 "",
             )
         if args == ["--sms-status"]:
-            return cardpulse_web.CommandResult(0, "Storage: ME 23/23 FULL", "")
+            return cardpulse_web.CommandResult(
+                0,
+                "Storage: ME 23/23 FULL\n"
+                "Format: PDU\n"
+                "New message indication: 2,1,0,0,0",
+                "",
+            )
         if args == ["--inbox"]:
             return cardpulse_web.CommandResult(0, "Index: 1\nFrom: +8613025523391\nPreview: OK", "")
         if args == ["--read-sms", "1"]:
@@ -98,7 +127,7 @@ class WebAPITestCase(unittest.TestCase):
 
         self.assertIn('<html lang="zh-CN">', html)
         self.assertIn("设备概览", html)
-        self.assertIn("刷新信息", html)
+        self.assertIn("刷新模组信息", html)
         self.assertIn("只读 AT 控制台", html)
         self.assertIn("测试短信", html)
         self.assertIn("短信测试默认关闭", html)
@@ -106,37 +135,48 @@ class WebAPITestCase(unittest.TestCase):
     def test_web_ui_has_loading_and_timeout_feedback(self):
         html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn("正在读取模块信息", html)
+        self.assertIn("正在读取概览状态", html)
+        self.assertIn("正在读取模组信息", html)
         self.assertIn("正在运行硬件诊断", html)
         self.assertIn("请求超时", html)
         self.assertIn("function setMetric", html)
+        self.assertIn("function refreshOverview", html)
 
-    def test_web_ui_has_sms_inbox_controls(self):
+    def test_web_ui_has_structured_overview_and_sms_controls(self):
         html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('data-view="inbox"', html)
-        self.assertIn("短信收件箱", html)
+        self.assertIn("/api/status", html)
+        self.assertIn("/api/info", html)
         self.assertIn("/api/sms/status", html)
         self.assertIn("/api/sms/inbox", html)
         self.assertIn("/api/sms/delete", html)
+        self.assertIn("短信收件箱", html)
+        self.assertIn("最近发送", html)
+        self.assertIn("下次发送", html)
+        self.assertIn("短信存储已满", html)
         self.assertIn("DELETE_SMS", html)
         self.assertIn("function smsStorageAdvice", html)
-        self.assertIn("短信存储已满", html)
-        self.assertIn("请先读取收件箱并删除 1 条旧短信再接收新短信", html)
 
-    def test_windows_recovery_script_keeps_sms_disabled_by_default(self):
+    def test_windows_recovery_script_verifies_doctor_and_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
 
         self.assertIn("usbipd.exe @Arguments", script)
+        self.assertIn("[1/7]", script)
         self.assertIn('@("list")', script)
         self.assertIn("skipping bind", script)
         self.assertIn('"bind", "--busid", $TargetBusId', script)
         self.assertIn('"attach", "--wsl", "--busid", $TargetBusId', script)
         self.assertIn("scripts/dji-qdc507-wsl-prepare.sh", script)
+        self.assertIn("cardpulse --doctor", script)
+        self.assertIn("AT: OK", script)
+        self.assertIn("Detected AT serial port", script)
         self.assertIn("--host $HostBind --port $Port$allowSmsArg", script)
         self.assertIn("SMS test remains disabled", script)
         self.assertIn("~/.cardpulse-dji/config/config.yaml", (ROOT_DIR / "docs" / "web-control.md").read_text(encoding="utf-8"))
         self.assertNotIn("1024", script)
+        self.assertIn("if stripped == \"serial:\"", script)
+        self.assertIn("line.startswith((\" \", \"\\t\")) and stripped.startswith(\"port:\")", script)
 
     def test_info_endpoint_adds_normalized_summary_fields(self):
         server, runner = self.start_server()
@@ -152,6 +192,36 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(data["network"], "5")
         self.assertEqual(data["operator"], "CHINA MOBILE")
         self.assertEqual(data["imei"], "863212060375703")
+
+    def test_status_endpoint_adds_schedule_summary_fields(self):
+        server, runner = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/status")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(runner.commands, [["--status"]])
+        self.assertEqual(data["last_send"], "2026-07-09 11:02:03")
+        self.assertEqual(data["days_since_last_send"], 0)
+        self.assertEqual(data["interval_days"], 179)
+        self.assertEqual(data["remaining_days"], 179)
+        self.assertFalse(data["send_due"])
+        self.assertEqual(data["next_send"], "2027-01-04 11:02:03")
+        self.assertEqual(data["last_result"], "success")
+
+    def test_sms_status_endpoint_adds_storage_summary_fields(self):
+        server, runner = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/sms/status")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(runner.commands, [["--sms-status"]])
+        self.assertEqual(data["storage_name"], "ME")
+        self.assertEqual(data["storage_used"], 23)
+        self.assertEqual(data["storage_total"], 23)
+        self.assertTrue(data["storage_full"])
+        self.assertEqual(data["message_indication"], "2,1,0,0,0")
 
     def test_sms_test_requires_server_gate_and_confirmation(self):
         server, runner = self.start_server(allow_sms=False)

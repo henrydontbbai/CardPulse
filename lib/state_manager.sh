@@ -1,24 +1,16 @@
 #!/bin/bash
-# ============================================================================
-# CardPulse - 状态管理模块
-# 管理发送状态和历史记录
-# ============================================================================
+# CardPulse - local send state helpers.
 
-# 防止重复加载
 [[ -n "${_STATE_MANAGER_LOADED:-}" ]] && return 0
 _STATE_MANAGER_LOADED=1
 
-# 状态目录
-STATE_DIR="${CONFIG_DIR}/state"
+STATE_DIR="${CARDPULSE_STATE_DIR:-${CONFIG_DIR}/state}"
 
-# 初始化状态目录
 state_init() {
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR" 2>/dev/null || true
 }
 
-# 原子写入文件（先写 .tmp 再 mv，避免断电/并发导致读取为空或损坏）
-# 用法: atomic_write "文件路径" "内容"
 atomic_write() {
     local file="$1"
     local content="$2"
@@ -29,8 +21,6 @@ atomic_write() {
     chmod 600 "$file" 2>/dev/null || true
 }
 
-# 加锁追加到历史记录
-# 使用 flock 防止并发写入交错
 append_history() {
     local line="$1"
     local history_file="${STATE_DIR}/history.log"
@@ -41,16 +31,14 @@ append_history() {
             echo "$line" >> "$history_file"
         ) 200>"${STATE_DIR}/history.lock"
     else
-        echo "[WARN] 未找到 flock，历史记录追加未加锁（macOS 真机测试可接受）" >&2
+        echo "[WARN] flock not found; history append is unlocked for local macOS testing" >&2
         echo "$line" >> "$history_file"
     fi
 }
 
-# 记录发送成功
-# 用法: state_record_success
 state_record_success() {
     state_init
-    
+
     local now_ts
     local now_date
     now_ts=$(date +%s)
@@ -59,92 +47,75 @@ state_record_success() {
     atomic_write "${STATE_DIR}/last_success" "$now_ts"
     atomic_write "${STATE_DIR}/last_success_date" "$now_date"
     append_history "$now_ts|$now_date|success"
-    
     return 0
 }
 
-# 记录发送失败
-# 用法: state_record_failure
 state_record_failure() {
     state_init
-    
+
     local now_ts
     local now_date
     now_ts=$(date +%s)
     now_date=$(date '+%Y-%m-%d %H:%M:%S')
 
     append_history "$now_ts|$now_date|failure"
-    
     return 0
 }
 
-# 判断是否需要发送
-# 返回: 0=需要发送, 1=不需要
-# 用法: state_should_send 179
 state_should_send() {
     local interval_days="${1:-179}"
     local last_success_file="${STATE_DIR}/last_success"
-    
-    # 如果从未发送过，需要发送
+
     if [[ ! -f "$last_success_file" ]]; then
         return 0
     fi
-    
-    # 读取上次发送时间
+
     local last_ts
     local now_ts
     local diff_seconds
     local diff_days
     read -r last_ts < "$last_success_file"
     if [[ ! "$last_ts" =~ ^[0-9]+$ ]]; then
-        echo "[WARN] 状态文件损坏，按从未发送处理: $last_success_file" >&2
+        echo "[WARN] State file is corrupted; treating as never sent: $last_success_file" >&2
         return 0
     fi
+
     now_ts=$(date +%s)
     diff_seconds=$((now_ts - last_ts))
     diff_days=$((diff_seconds / 86400))
 
     if [[ "$diff_days" -ge "$interval_days" ]]; then
         return 0
-    else
-        return 1
     fi
+    return 1
 }
 
-# 获取上次发送时间戳
-# 用法: last_ts=$(state_get_last_success)
 state_get_last_success() {
     local last_success_file="${STATE_DIR}/last_success"
-    
+
     if [[ -f "$last_success_file" ]]; then
         local last_ts
         read -r last_ts < "$last_success_file"
         if [[ "$last_ts" =~ ^[0-9]+$ ]]; then
             echo "$last_ts"
-        else
-            echo "0"
+            return
         fi
-    else
-        echo "0"
     fi
+    echo "0"
 }
 
-# 获取上次发送日期（人类可读）
-# 用法: last_date=$(state_get_last_success_date)
 state_get_last_success_date() {
     local last_success_file="${STATE_DIR}/last_success_date"
-    
+
     if [[ -f "$last_success_file" ]]; then
         local last_date
         read -r last_date < "$last_success_file"
         echo "$last_date"
-    else
-        echo "从未发送"
+        return
     fi
+    echo "never"
 }
 
-# 获取距今天数
-# 用法: days=$(state_get_days_since)
 state_get_days_since() {
     local last_ts
     last_ts=$(state_get_last_success)
@@ -153,19 +124,16 @@ state_get_days_since() {
         echo "-1"
         return
     fi
-    
+
     local now_ts
     local diff_seconds
     local diff_days
     now_ts=$(date +%s)
     diff_seconds=$((now_ts - last_ts))
     diff_days=$((diff_seconds / 86400))
-
     echo "$diff_days"
 }
 
-# 获取剩余天数
-# 用法: remaining=$(state_get_remaining 179)
 state_get_remaining() {
     local interval_days="${1:-179}"
     local days_since
@@ -175,9 +143,8 @@ state_get_remaining() {
         echo "0"
         return
     fi
-    
-    local remaining=$((interval_days - days_since))
 
+    local remaining=$((interval_days - days_since))
     if [[ $remaining -lt 0 ]]; then
         echo "0"
     else
@@ -185,50 +152,79 @@ state_get_remaining() {
     fi
 }
 
-# 显示状态信息
-# 用法: state_show_status
-state_show_status() {
-    state_init
-    
-    echo "=== CardPulse 状态 ==="
-    echo ""
-    echo "上次发送: $(state_get_last_success_date)"
-    
-    local days_since
-    days_since=$(state_get_days_since)
-    if [[ "$days_since" == "-1" ]]; then
-        echo "距今: 从未发送"
-    else
-        echo "距今: ${days_since} 天"
+state_get_last_result() {
+    local history_file="${STATE_DIR}/history.log"
+    if [[ ! -f "$history_file" ]]; then
+        echo "unknown"
+        return
     fi
-    
-    local interval
-    local remaining
-    interval=$(config_read ".sms.interval_days" "179")
-    remaining=$(state_get_remaining "$interval")
+
+    local last_entry
+    last_entry=$(tail -1 "$history_file" 2>/dev/null || true)
+    if [[ -z "$last_entry" ]]; then
+        echo "unknown"
+        return
+    fi
+    echo "${last_entry##*|}"
+}
+
+state_format_next_send() {
+    local interval_days="$1"
+    local remaining="$2"
+    local last_ts
+    last_ts=$(state_get_last_success)
+
+    if [[ "$last_ts" == "0" ]]; then
+        echo "due now"
+        return
+    fi
 
     if [[ "$remaining" -eq 0 ]]; then
-        echo "状态: 需要发送"
-    else
-        echo "还需等待: ${remaining} 天"
+        echo "due now"
+        return
     fi
-    
-    echo ""
-    echo "配置间隔: ${interval} 天"
-    
-    # 显示最近历史
+
+    local target_ts=$((last_ts + interval_days * 86400))
+    if next_send=$(date -d "@$target_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null); then
+        echo "$next_send"
+    else
+        echo "in ${remaining} days"
+    fi
+}
+
+state_show_status() {
+    state_init
+
+    local interval_days
+    interval_days=$(config_read ".sms.interval_days" "179")
+    local days_since
+    days_since=$(state_get_days_since)
+    local remaining_days
+    remaining_days=$(state_get_remaining "$interval_days")
+    local send_due="yes"
+    if [[ "$remaining_days" -gt 0 && "$days_since" != "-1" ]]; then
+        send_due="no"
+    fi
+
+    echo "=== CardPulse Status ==="
+    echo "Last send: $(state_get_last_success_date)"
+    echo "Days since last send: $days_since"
+    echo "Interval days: $interval_days"
+    echo "Remaining days: $remaining_days"
+    echo "Send due: $send_due"
+    echo "Next send: $(state_format_next_send "$interval_days" "$remaining_days")"
+    echo "Last result: $(state_get_last_result)"
+
     local history_file="${STATE_DIR}/history.log"
     if [[ -f "$history_file" ]]; then
         echo ""
-        echo "=== 最近记录 ==="
+        echo "=== Recent history ==="
         tail -5 "$history_file" | while IFS='|' read -r ts date status; do
             echo "  $date - $status"
         done
     fi
 }
 
-# 清除状态（重新开始计时）
-# 用法: state_reset
 state_reset() {
     rm -f "${STATE_DIR}/last_success" "${STATE_DIR}/last_success_date"
     return 0
