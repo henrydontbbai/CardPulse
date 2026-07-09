@@ -168,3 +168,19 @@ The script uses a stable WSL config path:
 ```
 
 If the stable config does not exist yet, it copies the existing `/tmp/cardpulse-dji-test/config/config.yaml` when available; otherwise it creates a safe local test config for `/dev/ttyUSB2`.
+
+The same recovery flow now writes the latest recovery result to:
+
+```text
+~/.cardpulse-dji/state/recovery.json
+```
+
+This file keeps a single latest-state snapshot for the Web overview page:
+
+- `state`: `ok` or `error`
+- `summary`: short recovery result summary
+- `checked_at`: latest recovery check time
+- `port`: detected AT serial port such as `/dev/ttyUSB2`
+- `web_url`: latest verified Web URL
+
+The Web overview reads that file and shows the latest recovery status on the home page. This is a current-state file, not a recovery history log.

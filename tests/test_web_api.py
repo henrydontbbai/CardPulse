@@ -21,6 +21,7 @@ class FakeRunner:
         self.commands = []
         self.at_commands = []
         self.sent_messages = []
+        self.notifications = []
 
     def run_cardpulse(self, args):
         self.commands.append(list(args))
@@ -119,6 +120,10 @@ class FakeRunner:
         self.sent_messages.append((phone, message))
         return cardpulse_web.CommandResult(0, "Message reference: 42", "")
 
+    def notify_event(self, title, body):
+        self.notifications.append((title, body))
+        return cardpulse_web.CommandResult(0, "notify ok", "")
+
 
 class FailingSmsStatusRunner(FakeRunner):
     def run_cardpulse(self, args):
@@ -136,14 +141,77 @@ class UnparseableReadSmsRunner(FakeRunner):
         return super().run_cardpulse(args)
 
 
+class RotatingInboxRunner(FakeRunner):
+    def __init__(self):
+        super().__init__()
+        self.inbox_calls = 0
+
+    def run_cardpulse(self, args):
+        if args == ["--inbox"]:
+            self.commands.append(list(args))
+            self.inbox_calls += 1
+            if self.inbox_calls == 1:
+                output = (
+                    "=== SMS inbox ===\n"
+                    "Index: 1\n"
+                    "Status: REC READ\n"
+                    "From: +8613025523391\n"
+                    "Time: 2026-07-09 11:03:04\n"
+                    "Preview: Old message\n"
+                )
+            else:
+                output = (
+                    "=== SMS inbox ===\n"
+                    "Index: 1\n"
+                    "Status: REC READ\n"
+                    "From: +8613025523391\n"
+                    "Time: 2026-07-09 11:03:04\n"
+                    "Preview: Old message\n\n"
+                    "Index: 2\n"
+                    "Status: REC UNREAD\n"
+                    "From: +447700900123\n"
+                    "Time: 2026-07-09 12:10:11\n"
+                    "Preview: Brand new inbound\n"
+                )
+            return cardpulse_web.CommandResult(0, output, "")
+        if args == ["--sms-status"]:
+            self.commands.append(list(args))
+            return cardpulse_web.CommandResult(
+                0,
+                "Storage: ME 20/23\n"
+                "Format: PDU\n"
+                "New message indication: 2,1,0,0,0",
+                "",
+            )
+        return super().run_cardpulse(args)
+
+
+class MutableSmsStatusRunner(FakeRunner):
+    def __init__(self):
+        super().__init__()
+        self.sms_status_output = (
+            "Storage: ME 23/23 FULL\n"
+            "Format: PDU\n"
+            "New message indication: 2,1,0,0,0"
+        )
+
+    def run_cardpulse(self, args):
+        if args == ["--sms-status"]:
+            self.commands.append(list(args))
+            return cardpulse_web.CommandResult(0, self.sms_status_output, "")
+        return super().run_cardpulse(args)
+
+
 class WebAPITestCase(unittest.TestCase):
-    def start_server(self, allow_sms=False, runner=None, history_path=None):
+    def start_server(self, allow_sms=False, runner=None, history_path=None, ops_state_path=None, recovery_state_path=None):
         runner = runner or FakeRunner()
         handler = cardpulse_web.make_handler(
             runner=runner,
             ui_path=None,
             allow_sms=allow_sms,
             history_path=history_path,
+            ops_state_path=ops_state_path,
+            recovery_state_path=recovery_state_path,
         )
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -221,10 +289,13 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("SIM / 网络", html)
         self.assertIn("短信容量", html)
         self.assertIn("保号任务", html)
+        self.assertIn("最近消息", html)
+        self.assertIn("恢复状态", html)
         self.assertIn("推荐动作", html)
         self.assertIn("读取可能会把未读短信标记为已读", html)
         self.assertIn("只删除明确无用的单条短信", html)
         self.assertIn("短信存储已满", html)
+        self.assertIn("新短信提醒", html)
         self.assertIn("DELETE_SMS", html)
         self.assertIn("SEND_SMS", html)
         self.assertIn("function renderCurrentMessages", html)
@@ -232,6 +303,9 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("function showMessageDetail", html)
         self.assertIn('data.ok && data.message && typeof data.message === "object"', html)
         self.assertIn("function applyOverview", html)
+        self.assertIn("recovery-summary", html)
+        self.assertIn("last-inbound", html)
+        self.assertIn("last-outbound", html)
 
     def test_windows_recovery_script_verifies_doctor_and_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
@@ -260,6 +334,10 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("Detected AT serial port", script)
         self.assertIn("/api/overview", script)
         self.assertIn("overview_status", script)
+        self.assertIn("recovery.json", script)
+        self.assertIn("recovery.json.tmp", script)
+        self.assertIn("mv $tmp_path $recoveryStatePathQ", script)
+        self.assertIn("if ($LASTEXITCODE -ne 0)", script)
         self.assertIn("--host $HostBind --port $Port$allowSmsArg", script)
         self.assertIn("SMS test remains disabled", script)
         self.assertIn("~/.cardpulse-dji/config/config.yaml", (ROOT_DIR / "docs" / "web-control.md").read_text(encoding="utf-8"))
@@ -333,6 +411,137 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(data["keepalive"]["summary"], "保号正常，距离下次发送还有 179 天")
         self.assertIn("sms_status", data["raw"])
         self.assertIn("=== sms_status ===", data["output"])
+
+    def test_message_center_detects_new_inbound_and_sends_summary_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RotatingInboxRunner()
+            server, _ = self.start_server(
+                runner=runner,
+                history_path=Path(tmpdir) / "messages.jsonl",
+                ops_state_path=Path(tmpdir) / "web-state.json",
+            )
+
+            first_status, first_data = self.request(server, "GET", "/api/messages/current")
+            second_status, second_data = self.request(server, "GET", "/api/messages/current")
+
+            self.assertEqual(first_status, 200)
+            self.assertEqual(second_status, 200)
+            self.assertEqual(first_data["new_message_count"], 0)
+            self.assertEqual(second_data["new_message_count"], 1)
+            self.assertEqual(len(second_data["new_messages"]), 1)
+            self.assertEqual(second_data["new_messages"][0]["phone"], "+447700900123")
+            self.assertEqual(len(runner.notifications), 1)
+            self.assertIn("新短信提醒", runner.notifications[0][0])
+            self.assertIn("Brand new inbound", runner.notifications[0][1])
+
+    def test_overview_includes_recent_activity_recovery_and_pending_alerts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RotatingInboxRunner()
+            history_path = Path(tmpdir) / "messages.jsonl"
+            ops_state_path = Path(tmpdir) / "web-state.json"
+            recovery_state_path = Path(tmpdir) / "recovery.json"
+            recovery_state_path.write_text(json.dumps({
+                "state": "ok",
+                "summary": "WSL 恢复成功",
+                "checked_at": "2026-07-09T12:11:12+00:00",
+                "port": "/dev/ttyUSB3",
+                "web_url": "http://127.0.0.1:8765",
+            }, ensure_ascii=False), encoding="utf-8")
+            server, _ = self.start_server(
+                runner=runner,
+                history_path=history_path,
+                ops_state_path=ops_state_path,
+                recovery_state_path=recovery_state_path,
+            )
+
+            self.request(server, "GET", "/api/messages/current")
+            self.request(server, "GET", "/api/messages/current")
+            status, data = self.request(server, "GET", "/api/overview")
+
+            self.assertEqual(status, 200)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["recent_messages"]["last_inbound"]["phone"], "+447700900123")
+            self.assertEqual(data["recent_messages"]["last_outbound"], None)
+            self.assertEqual(data["alerts"]["new_inbound"]["count"], 1)
+            self.assertEqual(data["alerts"]["storage"]["level"], "ok")
+            self.assertEqual(data["recovery"]["state"], "ok")
+            self.assertEqual(data["recovery"]["summary"], "WSL 恢复成功")
+            self.assertIn("新短信", data["recommended_action"])
+
+    def test_reading_pending_message_clears_new_inbound_alert(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RotatingInboxRunner()
+            server, _ = self.start_server(
+                runner=runner,
+                history_path=Path(tmpdir) / "messages.jsonl",
+                ops_state_path=Path(tmpdir) / "web-state.json",
+            )
+
+            self.request(server, "GET", "/api/messages/current")
+            self.request(server, "GET", "/api/messages/current")
+            before_status, before_data = self.request(server, "GET", "/api/overview")
+            read_status, read_data = self.request(server, "GET", "/api/messages/current/2")
+            after_status, after_data = self.request(server, "GET", "/api/overview")
+
+            self.assertEqual(before_status, 200)
+            self.assertEqual(read_status, 200)
+            self.assertEqual(after_status, 200)
+            self.assertEqual(before_data["alerts"]["new_inbound"]["count"], 1)
+            self.assertTrue(read_data["ok"])
+            self.assertEqual(after_data["alerts"]["new_inbound"]["count"], 0)
+
+    def test_overview_defaults_recovery_to_neutral_when_missing(self):
+        server, _ = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/overview")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["recovery"]["state"], "")
+        self.assertEqual(data["recovery"]["summary"], "")
+
+    def test_load_recovery_state_handles_multiline_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "recovery.json"
+            path.write_text(json.dumps({
+                "state": "error",
+                "summary": "first line\nsecond line",
+                "checked_at": "2026-07-09T12:11:12+00:00",
+                "port": "/dev/ttyUSB2",
+                "web_url": "http://127.0.0.1:8765",
+            }, ensure_ascii=False), encoding="utf-8")
+
+            data = cardpulse_web.load_recovery_state(path)
+
+            self.assertEqual(data["state"], "error")
+            self.assertEqual(data["summary"], "first line\nsecond line")
+
+    def test_storage_alert_notifications_deduplicate_until_level_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = MutableSmsStatusRunner()
+            server, _ = self.start_server(
+                runner=runner,
+                ops_state_path=Path(tmpdir) / "web-state.json",
+            )
+
+            first_status, first_data = self.request(server, "GET", "/api/overview")
+            second_status, second_data = self.request(server, "GET", "/api/overview")
+            runner.sms_status_output = (
+                "Storage: ME 20/23\n"
+                "Format: PDU\n"
+                "New message indication: 2,1,0,0,0"
+            )
+            third_status, third_data = self.request(server, "GET", "/api/overview")
+
+            self.assertEqual(first_status, 200)
+            self.assertEqual(second_status, 200)
+            self.assertEqual(third_status, 200)
+            self.assertEqual(first_data["alerts"]["storage"]["level"], "danger")
+            self.assertEqual(second_data["alerts"]["storage"]["level"], "danger")
+            self.assertEqual(third_data["alerts"]["storage"]["level"], "ok")
+            self.assertEqual(len(runner.notifications), 2)
+            self.assertIn("短信容量告警", runner.notifications[0][0])
+            self.assertIn("短信容量恢复", runner.notifications[1][0])
 
     def test_overview_endpoint_preserves_partial_details_when_sms_status_fails(self):
         failing_runner = FailingSmsStatusRunner()

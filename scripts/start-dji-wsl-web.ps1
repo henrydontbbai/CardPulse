@@ -116,9 +116,46 @@ if (-not $wslHome) {
 
 $configDir = "$wslHome/.cardpulse-dji/config"
 $stateDir = "$wslHome/.cardpulse-dji/state"
+$recoveryStatePath = "$stateDir/recovery.json"
+$recoveryTempPath = "$stateDir/recovery.json.tmp"
 $repoQ = Quote-Bash $repoWsl
 $configDirQ = Quote-Bash $configDir
 $stateDirQ = Quote-Bash $stateDir
+$recoveryStatePathQ = Quote-Bash $recoveryStatePath
+$recoveryTempPathQ = Quote-Bash $recoveryTempPath
+
+function Write-RecoveryState {
+    param(
+        [string]$State,
+        [string]$Summary,
+        [string]$PortValue = "",
+        [string]$WebUrl = ""
+    )
+
+    $checkedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    $payload = [ordered]@{
+        state = ($State ?? "")
+        summary = ($Summary ?? "")
+        checked_at = $checkedAt
+        port = ($PortValue ?? "")
+        web_url = ($WebUrl ?? "")
+    }
+    $json = $payload | ConvertTo-Json -Depth 3
+
+    $writeScript = @"
+set -euo pipefail
+mkdir -p $stateDirQ
+tmp_path=$recoveryTempPathQ
+cat > $tmp_path <<'JSON'
+$json
+JSON
+mv $tmp_path $recoveryStatePathQ
+"@
+    & wsl.exe -d $Distro -- bash -lc $writeScript | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to write recovery state with exit code $LASTEXITCODE"
+    }
+}
 
 Write-Host "[1/7] Keeping WSL distro alive: $Distro"
 Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $Distro, "--", "bash", "-lc", "while true; do sleep 3600; done") -WindowStyle Hidden
@@ -159,6 +196,8 @@ fi
 chmod 600 $configDirQ/config.yaml
 "@
 Invoke-Wsl -Command $configScript
+
+try {
 
 Write-Host "[4/7] Binding DJI/Baiwang module to Linux option serial driver"
 if ($SudoPassword) {
@@ -255,6 +294,7 @@ if ($doctorOutput -notmatch "(?m)^\s*Network registration: (1|5)\s*$") {
     throw "cardpulse --doctor did not confirm network registration 1/5.`n$doctorOutput"
 }
 Write-Host $doctorOutput
+$detectedPort = ([regex]::Match($doctorOutput, "Detected AT serial port:\s*(\S+)")).Groups[1].Value
 
 Write-Host "[6/7] Starting CardPulse Web on http://127.0.0.1:$Port"
 Invoke-Wsl -Command "pkill -f '[s]cripts/cardpulse-web.py' 2>/dev/null || true"
@@ -292,6 +332,17 @@ if (-not $overview.ok) {
     throw "Web /api/overview did not report a healthy overview: $($overview.recommended_action)"
 }
 
+$webUrl = "http://127.0.0.1:$Port"
+Write-RecoveryState -State "ok" -Summary "WSL 恢复成功" -PortValue $detectedPort -WebUrl $webUrl
+
 if (-not $AllowSms) {
     Write-Host "SMS test remains disabled. Start with -AllowSms only when you intentionally want the guarded SMS test endpoint."
+}
+} catch {
+    $errorMessage = $_.Exception.Message
+    try {
+        Write-RecoveryState -State "error" -Summary $errorMessage
+    } catch {
+    }
+    throw
 }

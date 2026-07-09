@@ -370,6 +370,16 @@
             <strong id="keepalive-summary">-</strong>
             <p>最近：<span id="last-send">-</span>；下次：<span id="next-send">-</span></p>
           </div>
+          <div class="panel ops-card wide">
+            <header><h3>最近消息</h3><span class="badge" id="recent-message-badge">未知</span></header>
+            <strong id="last-inbound">-</strong>
+            <p>最近发出：<span id="last-outbound">-</span></p>
+          </div>
+          <div class="panel ops-card wide">
+            <header><h3>恢复状态</h3><span class="badge" id="recovery-badge">未知</span></header>
+            <strong id="recovery-summary">-</strong>
+            <p>最近检测：<span id="recovery-checked-at">-</span>；端口：<span id="recovery-port">-</span></p>
+          </div>
         </div>
         <div class="panel">
           <div class="status-line" id="overview-status"></div>
@@ -568,7 +578,7 @@
           text: `短信存储已满（${label} FULL），请先读取收件箱并删除 1 条旧短信再接收新短信。`
         };
       }
-      if (storage.remaining <= 3) {
+      if (storage.remaining <= 1) {
         return {
           level: "warn",
           text: `短信存储接近满仓（${label}），仅剩 ${storage.remaining} 条，建议清理旧短信。`
@@ -601,6 +611,14 @@
       return "注意";
     }
 
+    function summaryForRecentMessage(message, fallbackText) {
+      if (!message || typeof message !== "object") return fallbackText || "-";
+      const phone = message.phone || message.from || message.to || "-";
+      const time = message.time || "时间未知";
+      const preview = message.preview || "(无内容)";
+      return `${time} · ${phone} · ${preview}`;
+    }
+
     function applyOverview(data) {
       setMetric("device", data.connection && data.connection.port);
       setMetric("imei", data.imei);
@@ -612,6 +630,10 @@
       setMetric("next-send", data.keepalive && data.keepalive.next_send);
       setMetric("keepalive-summary", data.keepalive && data.keepalive.summary);
       $("recommended-action").textContent = data.recommended_action || "-";
+
+      const recentMessages = data.recent_messages || {};
+      const alerts = data.alerts || {};
+      const recovery = data.recovery || {};
 
       const storage = data.sms_storage || {};
       const storageText = storage.total ? `${storage.name} ${storage.used}/${storage.total}` : "-";
@@ -625,6 +647,15 @@
       setBadge("network-badge", networkState, labelForState(networkState));
       setBadge("storage-badge", storage.severity, labelForState(storage.severity));
       setBadge("keepalive-badge", data.keepalive && data.keepalive.state, labelForState(data.keepalive && data.keepalive.state));
+      setBadge("recent-message-badge", (alerts.new_inbound && alerts.new_inbound.count) ? "warn" : "ok", (alerts.new_inbound && alerts.new_inbound.count) ? "新短信提醒" : "正常");
+      const recoveryState = recovery.state === "ok" ? "ok" : (recovery.state ? "warn" : "");
+      setBadge("recovery-badge", recoveryState, recoveryState ? labelForState(recoveryState) : "未知");
+
+      setMetric("last-inbound", summaryForRecentMessage(recentMessages.last_inbound, "暂无最近收到短信"));
+      setMetric("last-outbound", summaryForRecentMessage(recentMessages.last_outbound, "暂无最近发出短信"));
+      setMetric("recovery-summary", recovery.summary || "暂无恢复记录");
+      setMetric("recovery-checked-at", recovery.checked_at || "-");
+      setMetric("recovery-port", recovery.port || "-");
 
       const rawBlocks = [];
       if (data.raw && data.raw.status) rawBlocks.push(`=== 发送状态 ===\n${data.raw.status}`);
