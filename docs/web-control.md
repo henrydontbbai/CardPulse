@@ -78,6 +78,24 @@ The current DJI/Baiwang QDC507 module reports SMS receive support through `AT+CS
 
 Web delete requires the same `DELETE_SMS` confirmation token and only deletes one index per request.
 
+Current hardware note: after deleting five known disposable stored messages, the verified DJI/Baiwang test module reports `Storage: ME 18/23`. This leaves five free SMS slots for receive testing. Do not treat this as a general default; always trust the live `cardpulse --sms-status` result.
+
+Recommended receive test loop:
+
+```bash
+cardpulse --sms-status
+cardpulse --inbox
+# send one external SMS to the SIM from another phone
+cardpulse --inbox
+cardpulse --read-sms INDEX
+```
+
+If the store is full again, delete exactly one known disposable index first:
+
+```bash
+cardpulse --delete-sms INDEX --confirm DELETE_SMS
+```
+
 ## SMS Safety Gate
 
 The Web UI cannot send a real SMS unless the server is started with an explicit SMS gate:
@@ -109,6 +127,7 @@ Recommended order:
 ```bash
 cardpulse --doctor
 cardpulse --info
+cardpulse --sms-status
 python3 scripts/cardpulse-web.py --host 0.0.0.0
 ```
 

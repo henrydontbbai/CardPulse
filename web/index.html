@@ -463,6 +463,54 @@
       el.style.color = ok ? "var(--accent)" : "var(--muted)";
     }
 
+    function setStatusLevel(id, text, level) {
+      const el = $(id);
+      el.textContent = text;
+      const colors = {
+        ok: "var(--accent)",
+        warn: "var(--warn)",
+        danger: "var(--danger)",
+        muted: "var(--muted)"
+      };
+      el.style.color = colors[level] || colors.muted;
+    }
+
+    function parseSmsStorage(value) {
+      const match = String(value || "").match(/^(\S+)\s+(\d+)\/(\d+)(?:\s+(FULL))?/i);
+      if (!match) return null;
+      const used = Number(match[2]);
+      const total = Number(match[3]);
+      return {
+        storage: match[1],
+        used,
+        total,
+        remaining: Math.max(0, total - used),
+        full: Boolean(match[4]) || (total > 0 && used >= total)
+      };
+    }
+
+    function smsStorageAdvice(parsed) {
+      const storage = parseSmsStorage(parsed && parsed.storage);
+      if (!storage) return null;
+      const label = `${storage.storage} ${storage.used}/${storage.total}`;
+      if (storage.full) {
+        return {
+          level: "danger",
+          text: `短信存储已满（${label} FULL），请先读取收件箱并删除 1 条旧短信再接收新短信。`
+        };
+      }
+      if (storage.remaining <= 3) {
+        return {
+          level: "warn",
+          text: `短信存储接近满仓（${label}），仅剩 ${storage.remaining} 条，建议清理旧短信。`
+        };
+      }
+      return {
+        level: "ok",
+        text: `短信存储可用（${label}），剩余 ${storage.remaining} 条。`
+      };
+    }
+
     function setRaw(id, data) {
       $(id).textContent = data.output || data.message || "";
     }
@@ -543,7 +591,12 @@
       setRaw("inbox-output", {output: "正在查询 AT+CPMS / AT+CNMI 状态..."});
       const data = await api("/api/sms/status");
       setRaw("inbox-output", data);
-      setStatus("inbox-status", data.ok ? "短信存储状态已刷新" : data.message || "读取失败", data.ok);
+      const advice = smsStorageAdvice(data.parsed);
+      if (data.ok && advice) {
+        setStatusLevel("inbox-status", advice.text, advice.level);
+      } else {
+        setStatus("inbox-status", data.ok ? "短信存储状态已刷新" : data.message || "读取失败", data.ok);
+      }
     });
 
     $("refresh-inbox").addEventListener("click", async () => {

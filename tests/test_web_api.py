@@ -120,6 +120,9 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("/api/sms/inbox", html)
         self.assertIn("/api/sms/delete", html)
         self.assertIn("DELETE_SMS", html)
+        self.assertIn("function smsStorageAdvice", html)
+        self.assertIn("短信存储已满", html)
+        self.assertIn("请先读取收件箱并删除 1 条旧短信再接收新短信", html)
 
     def test_windows_recovery_script_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")

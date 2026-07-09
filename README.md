@@ -292,6 +292,17 @@ DJI/Baiwang QDC507 已验证支持短信接收相关 AT 查询：`AT+CSMS?`、`A
 
 删除短信必须显式指定单条索引，并提供确认令牌 `DELETE_SMS`；CardPulse 不提供自动清空或批量删除。
 
+当前 Windows + WSL + DJI/Baiwang QDC507 路线的日常检查顺序建议为：
+
+```bash
+cardpulse --doctor
+cardpulse --info
+cardpulse --sms-status
+cardpulse --inbox
+```
+
+如果短信存储显示 `ME 23/23 FULL`，先读取收件箱并只删除明确无用的一条旧短信，再测试接收新短信。当前实测模块在删除五条旧短信后为 `ME 18/23`，后续以实时 `--sms-status` 输出为准。
+
 ## License
 
 [MIT](LICENSE)
