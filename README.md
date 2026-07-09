@@ -274,6 +274,7 @@ powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 ```
 
 详见 [docs/web-control.md](docs/web-control.md)。
+产品定位与下一阶段方向见 [docs/product-direction.md](docs/product-direction.md)。
 
 ## 短信接收 / 收件箱
 
