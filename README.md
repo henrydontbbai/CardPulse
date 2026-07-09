@@ -273,6 +273,8 @@ Windows + WSL 的 DJI/Baiwang 模块可用一键恢复脚本启动只读控制�
 powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 ```
 
+脚本会从 `usbipd list` 自动查找 DJI/Baiwang `2CA3:4006` 的 BusId；只有需要手动覆盖时才传 `-BusId`。恢复验收会检查 AT、SIM READY、RSSI、网络注册和 Web 健康概览。
+
 详见 [docs/web-control.md](docs/web-control.md)。
 产品定位与下一阶段方向见 [docs/product-direction.md](docs/product-direction.md)。
 
@@ -292,6 +294,8 @@ cardpulse --delete-sms 1 --confirm DELETE_SMS
 DJI/Baiwang QDC507 已验证支持短信接收相关 AT 查询：`AT+CSMS?`、`AT+CPMS?`、`AT+CMGF?`、`AT+CNMI?`。如果 `--sms-status` 显示类似 `Storage: ME 23/23 FULL`，说明模块短信存储已满，需要先查看收件箱并手动删除无用短信，才能稳定接收新短信。
 
 删除短信必须显式指定单条索引，并提供确认令牌 `DELETE_SMS`；CardPulse 不提供自动清空或批量删除。
+
+Web 首页通过 `/api/overview` 汇总设备连接、SIM/网络、短信容量和保号任务，并给出“推荐动作”。收件箱页面仍坚持手动单条删除：只删除明确无用的短信，且必须输入 `DELETE_SMS`。
 
 当前 Windows + WSL + DJI/Baiwang QDC507 路线的日常检查顺序建议为：
 

@@ -1,6 +1,6 @@
 param(
     [string]$Distro = "Ubuntu-24.04",
-    [string]$BusId = "1-4",
+    [string]$BusId = "",
     [string]$HostBind = "0.0.0.0",
     [int]$Port = 8765,
     [switch]$AllowSms,
@@ -39,6 +39,30 @@ function Invoke-Usbipd {
         ExitCode = $exitCode
         Output = $outputText
     }
+}
+
+function Resolve-DjiBusId {
+    param([string]$OverrideBusId)
+
+    if ($OverrideBusId) {
+        return $OverrideBusId
+    }
+
+    $listResult = Invoke-Usbipd -Arguments @("list")
+    if ($listResult.ExitCode -ne 0) {
+        throw "usbipd list failed with exit code $($listResult.ExitCode)"
+    }
+
+    $targetLine = $listResult.Output -split "`n" | Where-Object { $_ -match "\b2CA3:4006\b" } | Select-Object -First 1
+    if (-not $targetLine) {
+        throw "DJI/Baiwang USB device 2CA3:4006 was not found in usbipd list. Replug the module, then retry."
+    }
+
+    if ($targetLine -notmatch "^\s*(\S+)\s+") {
+        throw "Unable to parse BusId from usbipd line: $targetLine"
+    }
+
+    return $Matches[1]
 }
 
 function Invoke-UsbipdBind {
@@ -100,9 +124,11 @@ Write-Host "[1/7] Keeping WSL distro alive: $Distro"
 Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $Distro, "--", "bash", "-lc", "while true; do sleep 3600; done") -WindowStyle Hidden
 Start-Sleep -Seconds 1
 
-Write-Host "[2/7] Sharing and attaching DJI/Baiwang USB device via usbipd: $BusId"
-Invoke-UsbipdBind -TargetBusId $BusId
-Invoke-UsbipdAttach -TargetBusId $BusId
+$TargetBusId = Resolve-DjiBusId -OverrideBusId $BusId
+Write-Host "[2/7] Sharing and attaching DJI/Baiwang USB device via usbipd: $TargetBusId"
+Write-Host "Using DJI/Baiwang USB BusId: $TargetBusId"
+Invoke-UsbipdBind -TargetBusId $TargetBusId
+Invoke-UsbipdAttach -TargetBusId $TargetBusId
 
 Write-Host "[3/7] Preparing stable CardPulse config in WSL: $configDir"
 $configScript = @"
@@ -194,7 +220,10 @@ for device in \$candidates; do
   current_output=\$(env CARDPULSE_CONFIG_DIR=$configDirQ CARDPULSE_STATE_DIR=$stateDirQ bash bin/cardpulse --doctor 2>&1 || true)
   printf '%s\n' "Trying AT serial port: \$device"
   printf '%s\n' "\$current_output"
-  if printf '%s' "\$current_output" | grep -q "AT: OK"; then
+  if printf '%s' "\$current_output" | grep -q "AT: OK" &&
+     printf '%s' "\$current_output" | grep -q "SIM: READY" &&
+     printf '%s\n' "\$current_output" | grep -Eq "^[[:space:]]*RSSI: ([0-9]|[1-8][0-9]|9[0-8])[[:space:]]*$" &&
+     printf '%s\n' "\$current_output" | grep -Eq "^[[:space:]]*Network registration: (1|5)[[:space:]]*$"; then
     selected_device="\$device"
     doctor_output="\$current_output"
     break
@@ -202,7 +231,7 @@ for device in \$candidates; do
 done
 
 if [ -z "\$selected_device" ]; then
-  echo "[ERROR] cardpulse --doctor did not confirm AT: OK on any /dev/ttyUSB* candidate." >&2
+  echo "[ERROR] cardpulse --doctor did not confirm AT: OK, SIM: READY, RSSI != 99, and Network registration: 1/5 on any /dev/ttyUSB* candidate." >&2
   exit 22
 fi
 
@@ -216,6 +245,15 @@ if ($doctorOutput -notmatch "Detected AT serial port") {
 if ($doctorOutput -notmatch "AT: OK") {
     throw "cardpulse --doctor did not confirm AT: OK.`n$doctorOutput"
 }
+if ($doctorOutput -notmatch "SIM: READY") {
+    throw "cardpulse --doctor did not confirm SIM: READY.`n$doctorOutput"
+}
+if ($doctorOutput -notmatch "(?m)^\s*RSSI: ([0-9]|[1-8][0-9]|9[0-8])\s*$") {
+    throw "cardpulse --doctor did not confirm usable RSSI.`n$doctorOutput"
+}
+if ($doctorOutput -notmatch "(?m)^\s*Network registration: (1|5)\s*$") {
+    throw "cardpulse --doctor did not confirm network registration 1/5.`n$doctorOutput"
+}
 Write-Host $doctorOutput
 
 Write-Host "[6/7] Starting CardPulse Web on http://127.0.0.1:$Port"
@@ -228,10 +266,13 @@ Start-Sleep -Seconds 2
 Write-Host "[7/7] Verifying Web and modem status"
 $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10
 $info = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/info" -TimeoutSec 35
+$overview = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/overview" -TimeoutSec 45
 
 $summary = [ordered]@{
     web_url = "http://127.0.0.1:$Port"
     sms_enabled = $health.sms_enabled
+    overview_status = $overview.overall_status
+    recommended_action = $overview.recommended_action
     sim = $info.sim
     signal = $info.signal
     operator = $info.operator
@@ -240,6 +281,16 @@ $summary = [ordered]@{
 }
 
 [pscustomobject]$summary | Format-List
+
+if ($info.sim -ne "READY") {
+    throw "Web /api/info did not report SIM READY."
+}
+if (-not ($info.signal -match "^\d+$") -or [int]$info.signal -eq 99) {
+    throw "Web /api/info did not report usable RSSI."
+}
+if (-not $overview.ok) {
+    throw "Web /api/overview did not report a healthy overview: $($overview.recommended_action)"
+}
 
 if (-not $AllowSms) {
     Write-Host "SMS test remains disabled. Start with -AllowSms only when you intentionally want the guarded SMS test endpoint."

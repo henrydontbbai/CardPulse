@@ -150,9 +150,11 @@ powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 This performs the normal recovery path:
 
 - keeps `Ubuntu-24.04` alive
-- shares DJI/Baiwang USB bus `1-4` with `usbipd bind`, then attaches it to WSL
+- finds the DJI/Baiwang `2CA3:4006` USB BusId from `usbipd list`, unless `-BusId` is provided
+- shares that USB device with `usbipd bind`, then attaches it to WSL
 - runs `scripts/dji-qdc507-wsl-prepare.sh` inside WSL
 - starts CardPulse Web at `http://127.0.0.1:8765`
+- verifies AT, SIM READY, usable RSSI, network registration, and Web status
 - keeps SMS test disabled unless `-AllowSms` is explicitly passed
 
 The helper checks `usbipd list` before binding. If the device is already `Shared` or `Attached`, it skips `bind`; otherwise, the first `usbipd bind` for a device may require an elevated Windows PowerShell prompt. After the device is shared once, later recovery runs can usually attach it without elevation.

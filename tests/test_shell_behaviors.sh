@@ -267,6 +267,53 @@ if [[ -n "$auto_detect_no_probe_output" ]]; then
     fail "sms_detect_device should fail when candidates exist but none answer AT"
 fi
 
+configured_port_fallback_root=$(mktemp -d)
+touch "$configured_port_fallback_root/configured" "$configured_port_fallback_root/detected"
+configured_port_fallback_output=$(
+    source lib/config_reader.sh
+    source lib/at_modem.sh
+    source lib/sms_sender.sh
+    config_read() {
+        case "$1" in
+          .serial.port) echo "$configured_port_fallback_root/configured" ;;
+          .serial.auto_detect) echo "true" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    at_probe_device() {
+        [[ "$1" == "$configured_port_fallback_root/detected" ]]
+    }
+    at_list_candidate_devices() {
+        printf '%s\n' "$configured_port_fallback_root/configured" "$configured_port_fallback_root/detected"
+    }
+    sms_detect_device
+)
+if [[ "$configured_port_fallback_output" != "$configured_port_fallback_root/detected" ]]; then
+    echo "$configured_port_fallback_output" >&2
+    fail "sms_detect_device should fall back from an unresponsive configured port when auto_detect=true"
+fi
+
+configured_port_strict_output=$(
+    source lib/config_reader.sh
+    source lib/at_modem.sh
+    source lib/sms_sender.sh
+    config_read() {
+        case "$1" in
+          .serial.port) echo "$configured_port_fallback_root/configured" ;;
+          .serial.auto_detect) echo "false" ;;
+          *) echo "${2:-}" ;;
+        esac
+    }
+    at_probe_device() {
+        return 1
+    }
+    sms_detect_device || true
+)
+if [[ -n "$configured_port_strict_output" ]]; then
+    echo "$configured_port_strict_output" >&2
+    fail "sms_detect_device should not silently use an unresponsive configured port when auto_detect=false"
+fi
+
 status_root=$(mktemp -d)
 mkdir -p "$status_root/state"
 printf '%s\n' "$(( $(date +%s) - 86400 ))" > "$status_root/state/last_success"

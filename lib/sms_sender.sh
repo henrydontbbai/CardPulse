@@ -26,10 +26,16 @@ sms_detect_device() {
     configured_port=$(config_read ".serial.port" "")
     auto_detect=$(config_read ".serial.auto_detect" "true")
 
-    # 如果配置了端口且存在，使用配置的端口
+    # 如果配置了端口且存在，先确认它确实响应 AT，避免重插后端口编号漂移误用。
     if [[ -n "$configured_port" && -e "$configured_port" ]]; then
-        echo "$configured_port"
-        return 0
+        if at_probe_device "$configured_port" "$(config_read ".serial.baudrate" "115200")" >/dev/null 2>&1; then
+            echo "$configured_port"
+            return 0
+        fi
+        if ! config_is_true "$auto_detect"; then
+            echo "[ERROR] Configured serial port exists but does not respond to AT: $configured_port" >&2
+            return 1
+        fi
     fi
     
     # 自动检测

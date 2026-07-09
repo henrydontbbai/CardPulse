@@ -148,6 +148,160 @@ def parse_sms_status_summary(parsed: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def severity_rank(value: str) -> int:
+    return {"ok": 0, "warn": 1, "danger": 2}.get(value, 1)
+
+
+def strongest_severity(values: list[str]) -> str:
+    return max(values, key=severity_rank) if values else "warn"
+
+
+def build_overview_payload(
+    *,
+    info: dict[str, Any],
+    status: dict[str, Any],
+    sms_status: dict[str, Any],
+    sms_enabled: bool,
+) -> dict[str, Any]:
+    info_ok = bool(info.get("ok"))
+    status_ok = bool(status.get("ok"))
+    sms_status_ok = bool(sms_status.get("ok"))
+    signal_value = parse_int(str(info.get("signal", "")))
+    network_value = str(info.get("network", "") or "").strip()
+    sim_status = str(info.get("sim", "") or "").strip()
+
+    connection = {
+        "port": info.get("device", ""),
+        "state": "ok" if info.get("device") and info_ok else "danger",
+    }
+    sim = {
+        "status": sim_status,
+        "ready": sim_status.upper() == "READY",
+    }
+    signal = {
+        "rssi": signal_value,
+        "state": "ok" if signal_value is not None and signal_value != 99 else "danger",
+    }
+    registration = {
+        "code": network_value,
+        "registered": network_value in {"1", "5"},
+    }
+
+    storage_used = sms_status.get("storage_used")
+    storage_total = sms_status.get("storage_total")
+    remaining = None
+    storage_severity = "warn"
+    if not sms_status_ok:
+        storage_severity = "danger"
+    elif isinstance(storage_used, int) and isinstance(storage_total, int):
+        remaining = max(0, storage_total - storage_used)
+        if sms_status.get("storage_full") or remaining == 0:
+            storage_severity = "danger"
+        elif remaining <= 3:
+            storage_severity = "warn"
+        else:
+            storage_severity = "ok"
+
+    send_due = status.get("send_due")
+    remaining_days = status.get("remaining_days")
+    last_result = str(status.get("last_result", "") or "")
+    if not status_ok:
+        keepalive_state = "warn"
+        keepalive_summary = "保号状态读取失败，请查看原始输出。"
+    elif send_due is True:
+        keepalive_state = "warn"
+        keepalive_summary = "今天应发送保号短信"
+    elif last_result and last_result != "success":
+        keepalive_state = "warn"
+        keepalive_summary = f"上次保号结果异常：{last_result}"
+    elif isinstance(remaining_days, int):
+        keepalive_state = "ok"
+        keepalive_summary = f"保号正常，距离下次发送还有 {remaining_days} 天"
+    else:
+        keepalive_state = "warn"
+        keepalive_summary = "保号状态未知，请先运行一次状态检查"
+
+    component_states = [
+        connection["state"],
+        "ok" if sim["ready"] else "danger",
+        signal["state"],
+        "ok" if registration["registered"] else "danger",
+        storage_severity,
+        keepalive_state,
+    ]
+    overall_status = strongest_severity(component_states)
+
+    command_failures = []
+    if not info_ok:
+        command_failures.append("模组信息")
+    if not status_ok:
+        command_failures.append("保号状态")
+    if not sms_status_ok:
+        command_failures.append("短信存储")
+
+    recommended_action = "状态正常，继续保持本地 Web 只读运维即可。"
+    if command_failures:
+        recommended_action = " / ".join(command_failures) + "读取失败，请查看原始输出并重新运行 WSL 恢复脚本。"
+    elif connection["state"] != "ok":
+        recommended_action = "设备端口不可用，请重新运行 WSL 恢复脚本。"
+    elif not sim["ready"]:
+        recommended_action = "SIM 未 READY，请检查 SIM 卡和模块状态。"
+    elif signal["state"] != "ok" or not registration["registered"]:
+        recommended_action = "网络未稳定注册，请检查信号、天线或运营商状态。"
+    elif storage_severity == "danger":
+        recommended_action = "短信存储已满，请读取收件箱并删除 1 条旧短信后再接收新短信。"
+    elif storage_severity == "warn":
+        recommended_action = "短信存储接近满仓，建议清理明确无用的旧短信。"
+    elif keepalive_state != "ok":
+        recommended_action = keepalive_summary
+
+    raw = {
+        "info": info.get("output", ""),
+        "status": status.get("output", ""),
+        "sms_status": sms_status.get("output", ""),
+    }
+    raw_blocks = []
+    if raw["status"]:
+        raw_blocks.append(f"=== status ===\n{raw['status']}")
+    if raw["info"]:
+        raw_blocks.append(f"=== info ===\n{raw['info']}")
+    if raw["sms_status"]:
+        raw_blocks.append(f"=== sms_status ===\n{raw['sms_status']}")
+
+    return {
+        "ok": info_ok and status_ok and sms_status_ok,
+        "overall_status": overall_status,
+        "recommended_action": recommended_action,
+        "sms_enabled": sms_enabled,
+        "connection": connection,
+        "sim": sim,
+        "signal": signal,
+        "registration": registration,
+        "operator": info.get("operator", ""),
+        "imei": info.get("imei", ""),
+        "sms_storage": {
+            "name": sms_status.get("storage_name", ""),
+            "used": storage_used,
+            "total": storage_total,
+            "remaining": remaining,
+            "full": sms_status.get("storage_full"),
+            "severity": storage_severity,
+            "format": sms_status.get("message_format", ""),
+        },
+        "keepalive": {
+            "state": keepalive_state,
+            "summary": keepalive_summary,
+            "last_send": status.get("last_send", ""),
+            "next_send": status.get("next_send", ""),
+            "last_result": last_result,
+            "send_due": send_due,
+            "remaining_days": remaining_days,
+        },
+        "raw": raw,
+        "output": "\n\n".join(raw_blocks),
+    }
+
+
 def result_payload(result: CommandResult, *, parsed: Optional[dict[str, str]] = None) -> dict[str, Any]:
     return {
         "ok": result.ok,
@@ -336,6 +490,22 @@ def make_handler(
                     payload = result_payload(runner.run_cardpulse(["--sms-status"]))
                     payload.update(parse_sms_status_summary(payload["parsed"]))
                     self.send_json(200, payload)
+                elif path == "/api/overview":
+                    info_payload = result_payload(runner.run_cardpulse(["--info"]))
+                    info_payload.update(info_summary(info_payload["parsed"]))
+                    status_payload = result_payload(runner.run_cardpulse(["--status"]))
+                    status_payload.update(parse_status_summary(status_payload["parsed"]))
+                    sms_payload = result_payload(runner.run_cardpulse(["--sms-status"]))
+                    sms_payload.update(parse_sms_status_summary(sms_payload["parsed"]))
+                    self.send_json(
+                        200,
+                        build_overview_payload(
+                            info=info_payload,
+                            status=status_payload,
+                            sms_status=sms_payload,
+                            sms_enabled=allow_sms,
+                        ),
+                    )
                 elif path == "/api/sms/inbox":
                     self.send_json(200, result_payload(runner.run_cardpulse(["--inbox"])))
                 elif path.startswith("/api/sms/messages/"):

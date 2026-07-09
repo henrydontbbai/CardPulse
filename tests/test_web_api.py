@@ -80,9 +80,17 @@ class FakeRunner:
         return cardpulse_web.CommandResult(0, "OK", "")
 
 
+class FailingSmsStatusRunner(FakeRunner):
+    def run_cardpulse(self, args):
+        if args == ["--sms-status"]:
+            self.commands.append(list(args))
+            return cardpulse_web.CommandResult(2, "", "[ERROR] sms storage did not respond")
+        return super().run_cardpulse(args)
+
+
 class WebAPITestCase(unittest.TestCase):
-    def start_server(self, allow_sms=False):
-        runner = FakeRunner()
+    def start_server(self, allow_sms=False, runner=None):
+        runner = runner or FakeRunner()
         handler = cardpulse_web.make_handler(
             runner=runner,
             ui_path=None,
@@ -127,7 +135,7 @@ class WebAPITestCase(unittest.TestCase):
 
         self.assertIn('<html lang="zh-CN">', html)
         self.assertIn("设备概览", html)
-        self.assertIn("刷新模组信息", html)
+        self.assertIn("推荐动作", html)
         self.assertIn("只读 AT 控制台", html)
         self.assertIn("测试短信", html)
         self.assertIn("短信测试默认关闭", html)
@@ -136,27 +144,32 @@ class WebAPITestCase(unittest.TestCase):
         html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn("正在读取概览状态", html)
-        self.assertIn("正在读取模组信息", html)
+        self.assertIn("/api/overview", html)
         self.assertIn("正在运行硬件诊断", html)
         self.assertIn("请求超时", html)
         self.assertIn("function setMetric", html)
         self.assertIn("function refreshOverview", html)
+        self.assertIn("data.raw || data.connection || data.sms_storage", html)
 
     def test_web_ui_has_structured_overview_and_sms_controls(self):
         html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('data-view="inbox"', html)
-        self.assertIn("/api/status", html)
-        self.assertIn("/api/info", html)
+        self.assertIn("/api/overview", html)
         self.assertIn("/api/sms/status", html)
         self.assertIn("/api/sms/inbox", html)
         self.assertIn("/api/sms/delete", html)
         self.assertIn("短信收件箱", html)
-        self.assertIn("最近发送", html)
-        self.assertIn("下次发送", html)
+        self.assertIn("设备连接", html)
+        self.assertIn("SIM / 网络", html)
+        self.assertIn("短信容量", html)
+        self.assertIn("保号任务", html)
+        self.assertIn("推荐动作", html)
+        self.assertIn("读取可能会把未读短信标记为已读", html)
+        self.assertIn("只删除明确无用的单条短信", html)
         self.assertIn("短信存储已满", html)
         self.assertIn("DELETE_SMS", html)
-        self.assertIn("function smsStorageAdvice", html)
+        self.assertIn("function applyOverview", html)
 
     def test_windows_recovery_script_verifies_doctor_and_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
@@ -164,13 +177,27 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("usbipd.exe @Arguments", script)
         self.assertIn("[1/7]", script)
         self.assertIn('@("list")', script)
+        self.assertIn("2CA3:4006", script)
+        self.assertIn("Resolve-DjiBusId", script)
+        self.assertIn("Using DJI/Baiwang USB BusId", script)
         self.assertIn("skipping bind", script)
         self.assertIn('"bind", "--busid", $TargetBusId', script)
         self.assertIn('"attach", "--wsl", "--busid", $TargetBusId', script)
         self.assertIn("scripts/dji-qdc507-wsl-prepare.sh", script)
         self.assertIn("cardpulse --doctor", script)
         self.assertIn("AT: OK", script)
+        self.assertIn("SIM: READY", script)
+        self.assertIn("Network registration", script)
+        self.assertIn("RSSI", script)
+        self.assertIn("^[[:space:]]*RSSI: ([0-9]|[1-8][0-9]|9[0-8])[[:space:]]*$", script)
+        self.assertIn("^[[:space:]]*Network registration: (1|5)[[:space:]]*$", script)
+        self.assertIn("(?m)^\\s*RSSI: ([0-9]|[1-8][0-9]|9[0-8])\\s*$", script)
+        self.assertIn("(?m)^\\s*Network registration: (1|5)\\s*$", script)
+        self.assertNotIn('grep -Eq "RSSI: ([0-9]|[1-8][0-9]|9[0-8])"', script)
+        self.assertNotIn('grep -Eq "Network registration: (1|5)"', script)
         self.assertIn("Detected AT serial port", script)
+        self.assertIn("/api/overview", script)
+        self.assertIn("overview_status", script)
         self.assertIn("--host $HostBind --port $Port$allowSmsArg", script)
         self.assertIn("SMS test remains disabled", script)
         self.assertIn("~/.cardpulse-dji/config/config.yaml", (ROOT_DIR / "docs" / "web-control.md").read_text(encoding="utf-8"))
@@ -222,6 +249,44 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(data["storage_total"], 23)
         self.assertTrue(data["storage_full"])
         self.assertEqual(data["message_indication"], "2,1,0,0,0")
+
+    def test_overview_endpoint_aggregates_health_and_recommendation(self):
+        server, runner = self.start_server(allow_sms=False)
+
+        status, data = self.request(server, "GET", "/api/overview")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(runner.commands, [["--info"], ["--status"], ["--sms-status"]])
+        self.assertEqual(data["overall_status"], "danger")
+        self.assertIn("删除 1 条旧短信", data["recommended_action"])
+        self.assertFalse(data["sms_enabled"])
+        self.assertEqual(data["connection"]["port"], "/dev/ttyUSB2")
+        self.assertEqual(data["sim"]["status"], "READY")
+        self.assertEqual(data["signal"]["rssi"], 21)
+        self.assertTrue(data["registration"]["registered"])
+        self.assertEqual(data["sms_storage"]["remaining"], 0)
+        self.assertEqual(data["sms_storage"]["severity"], "danger")
+        self.assertEqual(data["keepalive"]["state"], "ok")
+        self.assertEqual(data["keepalive"]["summary"], "保号正常，距离下次发送还有 179 天")
+        self.assertIn("sms_status", data["raw"])
+        self.assertIn("=== sms_status ===", data["output"])
+
+    def test_overview_endpoint_preserves_partial_details_when_sms_status_fails(self):
+        failing_runner = FailingSmsStatusRunner()
+        server, runner = self.start_server(allow_sms=False, runner=failing_runner)
+
+        status, data = self.request(server, "GET", "/api/overview")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(data["ok"])
+        self.assertEqual(runner.commands, [["--info"], ["--status"], ["--sms-status"]])
+        self.assertEqual(data["connection"]["port"], "/dev/ttyUSB2")
+        self.assertEqual(data["sim"]["status"], "READY")
+        self.assertEqual(data["sms_storage"]["severity"], "danger")
+        self.assertIn("短信存储读取失败", data["recommended_action"])
+        self.assertIn("[ERROR] sms storage did not respond", data["raw"]["sms_status"])
+        self.assertIn("=== sms_status ===", data["output"])
 
     def test_sms_test_requires_server_gate_and_confirmation(self):
         server, runner = self.start_server(allow_sms=False)

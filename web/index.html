@@ -136,6 +136,42 @@
       overflow-wrap: anywhere;
     }
     .wide { grid-column: span 2; }
+    .ops-card {
+      display: grid;
+      gap: 8px;
+      min-height: 126px;
+    }
+    .ops-card header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .ops-card h3 {
+      margin: 0;
+      font-size: 16px;
+    }
+    .ops-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+      text-wrap: pretty;
+    }
+    .ops-card strong {
+      font-size: 20px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+    .recommendation {
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      background: var(--panel-2);
+      color: var(--text);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .recommendation strong { display: block; margin-bottom: 4px; }
     .section { display: none; }
     .section.active { display: block; }
     .status-line {
@@ -237,19 +273,33 @@
           <h2>设备概览</h2>
           <div class="actions">
             <button class="secondary" id="refresh-overview">刷新概览状态</button>
-            <button class="secondary" id="refresh-info">刷新模组信息</button>
-            <button class="secondary" id="refresh-sms-summary">刷新短信状态</button>
           </div>
         </div>
+        <div class="recommendation">
+          <strong>推荐动作</strong>
+          <span id="recommended-action">正在读取概览状态</span>
+        </div>
         <div class="grid">
-          <div class="panel metric"><label>SIM 状态</label><strong id="sim">-</strong></div>
-          <div class="panel metric"><label>信号 RSSI</label><strong id="rssi">-</strong></div>
-          <div class="panel metric"><label>网络注册</label><strong id="network">-</strong></div>
-          <div class="panel metric"><label>运营商</label><strong id="operator">-</strong></div>
-          <div class="panel metric wide"><label>设备端口</label><strong id="device">-</strong></div>
-          <div class="panel metric wide"><label>IMEI</label><strong id="imei">-</strong></div>
-          <div class="panel metric wide"><label>最近发送</label><strong id="last-send">-</strong></div>
-          <div class="panel metric wide"><label>下次发送</label><strong id="next-send">-</strong></div>
+          <div class="panel ops-card">
+            <header><h3>设备连接</h3><span class="badge" id="connection-badge">未知</span></header>
+            <strong id="device">-</strong>
+            <p>IMEI：<span id="imei">-</span></p>
+          </div>
+          <div class="panel ops-card">
+            <header><h3>SIM / 网络</h3><span class="badge" id="network-badge">未知</span></header>
+            <strong id="sim">-</strong>
+            <p>RSSI：<span id="rssi">-</span>；注册：<span id="network">-</span>；运营商：<span id="operator">-</span></p>
+          </div>
+          <div class="panel ops-card">
+            <header><h3>短信容量</h3><span class="badge" id="storage-badge">未知</span></header>
+            <strong id="sms-storage">-</strong>
+            <p id="sms-storage-detail">读取可能会把未读短信标记为已读；不会自动删除。</p>
+          </div>
+          <div class="panel ops-card">
+            <header><h3>保号任务</h3><span class="badge" id="keepalive-badge">未知</span></header>
+            <strong id="keepalive-summary">-</strong>
+            <p>最近：<span id="last-send">-</span>；下次：<span id="next-send">-</span></p>
+          </div>
         </div>
         <div class="panel">
           <div class="status-line" id="overview-status"></div>
@@ -310,6 +360,9 @@
           <span class="badge">只读优先</span>
         </div>
         <div class="panel">
+          <div class="status-line">
+            默认只读：不会自动删除；读取可能会把未读短信标记为已读；满仓会影响接收新短信；只删除明确无用的单条短信。
+          </div>
           <div class="actions" style="justify-content:flex-start;margin-bottom:12px;">
             <button class="secondary" id="refresh-sms-status">刷新存储状态</button>
             <button class="primary" id="refresh-inbox">读取收件箱</button>
@@ -428,18 +481,50 @@
       $(id).textContent = value && value !== "-" ? value : "-";
     }
 
-    function applyInfo(data) {
-      setMetric("sim", data.sim);
-      setMetric("rssi", data.signal);
-      setMetric("network", data.network);
-      setMetric("operator", data.operator);
-      setMetric("device", data.device);
-      setMetric("imei", data.imei);
+    function setBadge(id, state, text) {
+      const badge = $(id);
+      badge.textContent = text;
+      badge.classList.remove("ok", "warn", "danger");
+      if (state) badge.classList.add(state);
     }
 
-    function applyStatus(data) {
-      setMetric("last-send", data.last_send);
-      setMetric("next-send", data.next_send);
+    function labelForState(state) {
+      if (state === "ok") return "正常";
+      if (state === "danger") return "异常";
+      return "注意";
+    }
+
+    function applyOverview(data) {
+      setMetric("device", data.connection && data.connection.port);
+      setMetric("imei", data.imei);
+      setMetric("sim", data.sim && data.sim.status);
+      setMetric("rssi", data.signal && data.signal.rssi);
+      setMetric("network", data.registration && data.registration.code);
+      setMetric("operator", data.operator);
+      setMetric("last-send", data.keepalive && data.keepalive.last_send);
+      setMetric("next-send", data.keepalive && data.keepalive.next_send);
+      setMetric("keepalive-summary", data.keepalive && data.keepalive.summary);
+      $("recommended-action").textContent = data.recommended_action || "-";
+
+      const storage = data.sms_storage || {};
+      const storageText = storage.total ? `${storage.name} ${storage.used}/${storage.total}` : "-";
+      setMetric("sms-storage", storageText);
+      $("sms-storage-detail").textContent = storage.total
+        ? `剩余 ${storage.remaining} 条；读取可能会把未读短信标记为已读，只删除明确无用的单条短信。`
+        : "读取可能会把未读短信标记为已读；不会自动删除。";
+
+      setBadge("connection-badge", data.connection && data.connection.state, labelForState(data.connection && data.connection.state));
+      const networkState = data.sim && data.sim.ready && data.registration && data.registration.registered ? "ok" : "danger";
+      setBadge("network-badge", networkState, labelForState(networkState));
+      setBadge("storage-badge", storage.severity, labelForState(storage.severity));
+      setBadge("keepalive-badge", data.keepalive && data.keepalive.state, labelForState(data.keepalive && data.keepalive.state));
+
+      const rawBlocks = [];
+      if (data.raw && data.raw.status) rawBlocks.push(`=== 发送状态 ===\n${data.raw.status}`);
+      if (data.raw && data.raw.info) rawBlocks.push(`=== 模组信息 ===\n${data.raw.info}`);
+      if (data.raw && data.raw.sms_status) rawBlocks.push(`=== 短信状态 ===\n${data.raw.sms_status}`);
+      setRaw("overview-output", {output: rawBlocks.join("\n\n")});
+      setStatusLevel("overview-status", data.recommended_action || "概览状态已刷新", data.overall_status || "muted");
     }
 
     async function refreshDoctor(targetStatus = "doctor-status", targetOutput = "doctor-output") {
@@ -451,68 +536,22 @@
       return data;
     }
 
-    async function refreshInfo() {
-      setStatus("overview-status", "正在读取模组信息", true);
-      const data = await api("/api/info", {}, 35000);
-      if (data.ok) {
-        applyInfo(data);
-      }
-      return data;
-    }
-
-    async function refreshStatus() {
-      const data = await api("/api/status");
-      if (data.ok) {
-        applyStatus(data);
-      }
-      return data;
-    }
-
-    async function refreshSmsSummary() {
-      const data = await api("/api/sms/status");
-      return data;
-    }
-
     async function refreshOverview() {
       setStatus("overview-status", "正在读取概览状态", true);
       setRaw("overview-output", {output: "正在读取概览状态..."});
-      const [statusData, infoData, smsData] = await Promise.all([
-        refreshStatus(),
-        refreshInfo(),
-        refreshSmsSummary()
-      ]);
-      const rawBlocks = [];
-      if (statusData.output) rawBlocks.push(`=== 发送状态 ===\n${statusData.output}`);
-      if (infoData.output) rawBlocks.push(`=== 模组信息 ===\n${infoData.output}`);
-      if (smsData.output) rawBlocks.push(`=== 短信状态 ===\n${smsData.output}`);
-      setRaw("overview-output", {output: rawBlocks.join("\n\n")});
-
-      const smsAdvice = smsStorageAdvice(smsData.parsed);
-      if (!statusData.ok || !infoData.ok || !smsData.ok) {
-        setStatus("overview-status", "概览读取失败，请查看下方原始输出。", false);
-      } else if (smsAdvice && smsAdvice.level !== "ok") {
-        setStatusLevel("overview-status", smsAdvice.text, smsAdvice.level);
+      const data = await api("/api/overview", {}, 45000);
+      if (data.raw || data.connection || data.sms_storage) {
+        applyOverview(data);
+        if (!data.ok) {
+          setStatusLevel("overview-status", data.recommended_action || "概览部分读取失败，请查看原始输出。", data.overall_status || "danger");
+        }
       } else {
-        setStatus("overview-status", "概览状态已刷新，可直接判断设备、SIM、网络与短信存储状态。", true);
+        setRaw("overview-output", data);
+        setStatus("overview-status", data.message || "概览读取失败，请查看排障详情。", false);
       }
     }
 
     $("refresh-overview").addEventListener("click", refreshOverview);
-    $("refresh-info").addEventListener("click", async () => {
-      const data = await refreshInfo();
-      setRaw("overview-output", data);
-      setStatus("overview-status", data.ok ? "模组信息已刷新" : (data.message || "模组信息读取失败"), data.ok);
-    });
-    $("refresh-sms-summary").addEventListener("click", async () => {
-      const data = await refreshSmsSummary();
-      setRaw("overview-output", data);
-      const advice = smsStorageAdvice(data.parsed);
-      if (data.ok && advice) {
-        setStatusLevel("overview-status", advice.text, advice.level);
-      } else {
-        setStatus("overview-status", data.ok ? "短信状态已刷新" : (data.message || "短信状态读取失败"), data.ok);
-      }
-    });
     $("run-doctor").addEventListener("click", () => refreshDoctor());
 
     $("send-at").addEventListener("click", async () => {
