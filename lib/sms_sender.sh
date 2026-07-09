@@ -8,6 +8,16 @@
 [[ -n "${_SMS_SENDER_LOADED:-}" ]] && return 0
 _SMS_SENDER_LOADED=1
 
+if ! command -v at_list_candidate_devices >/dev/null 2>&1; then
+    if [[ -n "${CARDPULSE_LIB_DIR:-}" && -f "${CARDPULSE_LIB_DIR}/at_modem.sh" ]]; then
+        # shellcheck disable=SC1091
+        source "${CARDPULSE_LIB_DIR}/at_modem.sh"
+    else
+        # shellcheck disable=SC1091
+        source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/at_modem.sh"
+    fi
+fi
+
 # 检测串口设备
 # 优先使用配置中的端口，否则自动检测
 sms_detect_device() {
@@ -33,7 +43,7 @@ sms_detect_device() {
         echo "$detected"
         return 0
     fi
-    
+
     return 1
 }
 

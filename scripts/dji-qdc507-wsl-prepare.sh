@@ -28,6 +28,10 @@ find_usb_device() {
     return 1
 }
 
+list_serial_ports() {
+    compgen -G "$DEV_ROOT/ttyUSB*" || true
+}
+
 device_path="$(find_usb_device || true)"
 if [[ -z "$device_path" ]]; then
     echo "[ERROR] DJI/Baiwang USB device ${VID}:${PID} was not found in WSL." >&2
@@ -71,3 +75,6 @@ if ! ls -l "$DEV_ROOT"/ttyUSB* 2>/dev/null; then
     echo "[WARN] No /dev/ttyUSB* ports appeared after binding ${VID}:${PID}."
     exit 5
 fi
+
+echo "[INFO] Detected AT serial port candidates:"
+list_serial_ports

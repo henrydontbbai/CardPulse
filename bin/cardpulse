@@ -49,11 +49,17 @@ resolve_lib_dir() {
 
 load_modules() {
     LIB_DIR="$(resolve_lib_dir)" || exit 1
+    # shellcheck disable=SC1091
     source "${LIB_DIR}/config_reader.sh"
+    # shellcheck disable=SC1091
     source "${LIB_DIR}/at_modem.sh"
+    # shellcheck disable=SC1091
     source "${LIB_DIR}/sms_sender.sh"
+    # shellcheck disable=SC1091
     source "${LIB_DIR}/sms_receiver.sh"
+    # shellcheck disable=SC1091
     source "${LIB_DIR}/state_manager.sh"
+    # shellcheck disable=SC1091
     source "${LIB_DIR}/notifier.sh"
 }
 
@@ -274,11 +280,14 @@ doctor_wwan_hints() {
 doctor_usb_hints() {
     local found=false
     local output=""
+    local line
 
     if command -v system_profiler >/dev/null 2>&1; then
         output=$(system_profiler SPUSBDataType 2>/dev/null | LC_ALL=C grep -Ei 'Baiwang|DJI|Quectel|Huawei|SIMCom|SIM7600|EC20|EC25|2CA3|4006' || true)
         if [[ -n "$output" ]]; then
-            echo "$output" | sed 's/^/  /'
+            while IFS= read -r line; do
+                printf '  %s\n' "$line"
+            done <<< "$output"
             found=true
         fi
     fi
@@ -286,7 +295,9 @@ doctor_usb_hints() {
     if command -v ioreg >/dev/null 2>&1; then
         output=$(ioreg -p IOUSB -l -w 0 2>/dev/null | LC_ALL=C grep -Ei 'Baiwang|DJI|Quectel|Huawei|SIMCom|SIM7600|EC20|EC25|2CA3|4006|idVendor.*11427|idProduct.*16390' || true)
         if [[ -n "$output" ]]; then
-            echo "$output" | sed 's/^/  /'
+            while IFS= read -r line; do
+                printf '  %s\n' "$line"
+            done <<< "$output"
             found=true
         fi
     fi
@@ -294,7 +305,9 @@ doctor_usb_hints() {
     if command -v lsusb >/dev/null 2>&1; then
         output=$(lsusb 2>/dev/null | LC_ALL=C grep -Ei 'Baiwang|DJI|Quectel|Huawei|SIMCom|SIM7600|EC20|EC25|2CA3|4006' || true)
         if [[ -n "$output" ]]; then
-            echo "$output" | sed 's/^/  /'
+            while IFS= read -r line; do
+                printf '  %s\n' "$line"
+            done <<< "$output"
             found=true
         fi
     fi

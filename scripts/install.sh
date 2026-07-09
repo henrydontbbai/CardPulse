@@ -48,7 +48,7 @@ validate_generated_value() {
     local value="$2"
 
     case "$value" in
-        *$'\n'*|*$'\r'*|*\%*|*\"*|*\'*)
+        *$'\n'*|*$'\r'*|*%*|*\"*|*\'*)
             error "$label 包含不支持的字符（换行、引号或 %）: $value"
             ;;
     esac

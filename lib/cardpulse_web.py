@@ -91,6 +91,63 @@ def parse_colon_lines(output: str) -> dict[str, str]:
     return parsed
 
 
+def parse_bool(value: str) -> bool | None:
+    normalized = (value or "").strip().lower()
+    if normalized in {"yes", "true", "1", "ready"}:
+        return True
+    if normalized in {"no", "false", "0"}:
+        return False
+    return None
+
+
+def parse_int(value: str) -> int | None:
+    try:
+        return int((value or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_status_summary(parsed: dict[str, str]) -> dict[str, Any]:
+    days_since = parse_int(first_parsed_value(parsed, ("days_since_last_send",)))
+    interval_days = parse_int(first_parsed_value(parsed, ("interval_days",)))
+    remaining_days = parse_int(first_parsed_value(parsed, ("remaining_days",)))
+    send_due_raw = first_parsed_value(parsed, ("send_due",))
+    send_due = parse_bool(send_due_raw)
+    return {
+        "last_send": first_parsed_value(parsed, ("last_send",)),
+        "days_since_last_send": days_since,
+        "interval_days": interval_days,
+        "remaining_days": remaining_days,
+        "send_due": bool(send_due) if send_due is not None else None,
+        "next_send": first_parsed_value(parsed, ("next_send",)),
+        "last_result": first_parsed_value(parsed, ("last_result",)),
+    }
+
+
+def parse_sms_status_summary(parsed: dict[str, str]) -> dict[str, Any]:
+    storage_raw = first_parsed_value(parsed, ("storage",))
+    storage_match = re.match(r"^(\S+)\s+(\d+)/(\d+)(?:\s+(FULL))?$", storage_raw)
+    storage_name = ""
+    storage_used = None
+    storage_total = None
+    storage_full = None
+    if storage_match:
+        storage_name = storage_match.group(1)
+        storage_used = int(storage_match.group(2))
+        storage_total = int(storage_match.group(3))
+        storage_full = bool(storage_match.group(4)) or (
+            storage_total > 0 and storage_used >= storage_total
+        )
+    return {
+        "storage_name": storage_name,
+        "storage_used": storage_used,
+        "storage_total": storage_total,
+        "storage_full": storage_full,
+        "message_indication": first_parsed_value(parsed, ("new_message_indication",)),
+        "message_format": first_parsed_value(parsed, ("format",)),
+    }
+
+
 def result_payload(result: CommandResult, *, parsed: Optional[dict[str, str]] = None) -> dict[str, Any]:
     return {
         "ok": result.ok,
@@ -272,9 +329,13 @@ def make_handler(
                     payload.update(info_summary(payload["parsed"]))
                     self.send_json(200, payload)
                 elif path == "/api/status":
-                    self.send_json(200, result_payload(runner.run_cardpulse(["--status"])))
+                    payload = result_payload(runner.run_cardpulse(["--status"]))
+                    payload.update(parse_status_summary(payload["parsed"]))
+                    self.send_json(200, payload)
                 elif path == "/api/sms/status":
-                    self.send_json(200, result_payload(runner.run_cardpulse(["--sms-status"])))
+                    payload = result_payload(runner.run_cardpulse(["--sms-status"]))
+                    payload.update(parse_sms_status_summary(payload["parsed"]))
+                    self.send_json(200, payload)
                 elif path == "/api/sms/inbox":
                     self.send_json(200, result_payload(runner.run_cardpulse(["--inbox"])))
                 elif path.startswith("/api/sms/messages/"):
