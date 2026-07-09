@@ -172,6 +172,75 @@
       box-shadow: inset 0 0 0 1px var(--line);
     }
     .recommendation strong { display: block; margin-bottom: 4px; }
+    .message-layout {
+      display: grid;
+      grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+    .message-list {
+      display: grid;
+      gap: 8px;
+      max-height: 520px;
+      overflow: auto;
+    }
+    .message-item {
+      width: 100%;
+      min-height: 76px;
+      display: grid;
+      gap: 5px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+      transition: background-color .16s ease, border-color .16s ease, transform .08s ease;
+    }
+    .message-item:hover {
+      background: var(--panel-2);
+      border-color: #bdd1c2;
+    }
+    .message-item:active { transform: scale(.96); }
+    .message-item strong,
+    .message-meta {
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+    .message-meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .message-preview {
+      color: var(--text);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .message-detail {
+      min-height: 220px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.55;
+    }
+    .message-toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 120px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      padding: 10px 12px;
+      resize: vertical;
+      font: inherit;
+    }
     .section { display: none; }
     .section.active { display: block; }
     .status-line {
@@ -237,6 +306,7 @@
         border-bottom: 1px solid var(--line);
       }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .message-layout { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
       main, aside { padding: 16px; }
@@ -263,7 +333,7 @@
         <button data-view="doctor">硬件诊断</button>
         <button data-view="terminal">只读 AT 控制台</button>
         <button data-view="sms">测试短信</button>
-        <button data-view="inbox">短信收件箱</button>
+        <button data-view="inbox">消息中心</button>
       </nav>
     </aside>
 
@@ -356,24 +426,61 @@
 
       <section id="inbox" class="section">
         <div class="topbar">
-          <h2>短信收件箱</h2>
-          <span class="badge">只读优先</span>
+          <h2>消息中心</h2>
+          <span class="badge">当前模块 + 本地历史</span>
         </div>
-        <div class="panel">
-          <div class="status-line">
-            默认只读：不会自动删除；读取可能会把未读短信标记为已读；满仓会影响接收新短信；只删除明确无用的单条短信。
+        <div class="message-layout">
+          <div class="panel">
+            <div class="message-toolbar">
+              <button class="secondary" id="refresh-sms-status">刷新存储状态</button>
+              <button class="primary" id="refresh-inbox">刷新当前模块</button>
+            </div>
+            <div class="status-line" id="inbox-status">
+              当前模块列表展示模块里仍存在的短信；读取可能会把未读短信标记为已读。
+              兼容旧短信收件箱接口 /api/sms/inbox，但新消息中心优先使用结构化接口。
+            </div>
+            <div class="message-list" id="current-message-list"></div>
           </div>
-          <div class="actions" style="justify-content:flex-start;margin-bottom:12px;">
-            <button class="secondary" id="refresh-sms-status">刷新存储状态</button>
-            <button class="primary" id="refresh-inbox">读取收件箱</button>
+
+          <div class="panel">
+            <div class="topbar" style="margin-bottom:12px;">
+              <h2 style="font-size:18px;">短信详情</h2>
+              <button class="danger" id="delete-sms" disabled>删除当前模块短信</button>
+            </div>
+            <div class="status-line" id="message-detail-status">从左侧选择一条短信查看完整内容。</div>
+            <div class="message-detail" id="message-detail">尚未选择短信。</div>
           </div>
-          <div class="form-row">
-            <input class="command" id="sms-index" value="1" autocomplete="off">
-            <button class="secondary" id="read-sms">读取单条</button>
-            <button class="danger" id="delete-sms">删除单条</button>
+
+          <div class="panel">
+            <div class="topbar" style="margin-bottom:12px;">
+              <h2 style="font-size:18px;">本地历史</h2>
+              <label class="badge" for="history-direction">方向筛选</label>
+            </div>
+            <div class="form-row">
+              <select id="history-direction">
+                <option value="">全部方向</option>
+                <option value="inbound">收到</option>
+                <option value="outbound">发出</option>
+              </select>
+              <button class="secondary" id="refresh-history">刷新历史</button>
+            </div>
+            <div class="message-list" id="history-message-list"></div>
           </div>
-          <div class="status-line" id="inbox-status"></div>
-          <pre class="raw" id="inbox-output"></pre>
+
+          <div class="panel">
+            <div class="topbar" style="margin-bottom:12px;">
+              <h2 style="font-size:18px;">发送短信</h2>
+              <span class="badge warn" id="message-send-gate">发送默认关闭</span>
+            </div>
+            <div class="form-row">
+              <input class="command" id="message-phone" placeholder="+8613025523391" autocomplete="off">
+            </div>
+            <textarea id="message-body" placeholder="输入要发送的短信内容"></textarea>
+            <div class="actions" style="justify-content:flex-start;margin-top:12px;">
+              <button class="danger" id="send-message" disabled>发送短信</button>
+            </div>
+            <div class="status-line" id="message-send-status"></div>
+          </div>
         </div>
       </section>
     </main>
@@ -584,15 +691,76 @@
       }
     });
 
-    function smsIndex() {
-      return $("sms-index").value.trim();
+    let selectedModuleIndex = "";
+
+    function messageLabel(message) {
+      if (message.direction === "outbound") return `发出至 ${message.to || message.phone || "-"}`;
+      return `来自 ${message.from || message.phone || "-"}`;
+    }
+
+    function renderMessageButton(message, onClick) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "message-item";
+
+      const title = document.createElement("strong");
+      title.textContent = messageLabel(message);
+
+      const meta = document.createElement("span");
+      meta.className = "message-meta";
+      meta.textContent = `${message.time || "时间未知"} · ${message.status || "-"} · ${message.storage || "-"}`;
+
+      const preview = document.createElement("span");
+      preview.className = "message-preview";
+      preview.textContent = message.preview || message.body || "(无内容)";
+
+      button.append(title, meta, preview);
+      button.addEventListener("click", () => onClick(message));
+      return button;
+    }
+
+    function renderCurrentMessages(messages) {
+      const list = $("current-message-list");
+      list.innerHTML = "";
+      if (!messages.length) {
+        list.innerHTML = '<div class="status-line">当前模块没有短信。</div>';
+        return;
+      }
+      messages.forEach((message) => {
+        list.appendChild(renderMessageButton(message, () => readCurrentMessage(message.index)));
+      });
+    }
+
+    function renderHistoryMessages(messages) {
+      const list = $("history-message-list");
+      list.innerHTML = "";
+      if (!messages.length) {
+        list.innerHTML = '<div class="status-line">本地历史暂无记录。</div>';
+        return;
+      }
+      messages.forEach((message) => {
+        list.appendChild(renderMessageButton(message, showMessageDetail));
+      });
+    }
+
+    function showMessageDetail(message) {
+      selectedModuleIndex = message.storage === "module" ? (message.index || "") : "";
+      $("delete-sms").disabled = !selectedModuleIndex;
+      $("message-detail-status").textContent = `${messageLabel(message)} · ${message.time || "时间未知"}`;
+      $("message-detail").textContent = message.body || message.preview || "(无内容)";
+    }
+
+    async function refreshHistory() {
+      const direction = $("history-direction").value;
+      const path = direction ? `/api/messages/history?direction=${encodeURIComponent(direction)}` : "/api/messages/history";
+      const data = await api(path);
+      renderHistoryMessages(data.messages || []);
+      return data;
     }
 
     $("refresh-sms-status").addEventListener("click", async () => {
       setStatus("inbox-status", "正在读取短信存储状态", true);
-      setRaw("inbox-output", {output: "正在查询 AT+CPMS / AT+CNMI 状态..."});
       const data = await api("/api/sms/status");
-      setRaw("inbox-output", data);
       const advice = smsStorageAdvice(data.parsed);
       if (data.ok && advice) {
         setStatusLevel("inbox-status", advice.text, advice.level);
@@ -603,25 +771,26 @@
     });
 
     $("refresh-inbox").addEventListener("click", async () => {
-      setStatus("inbox-status", "正在读取收件箱", true);
-      setRaw("inbox-output", {output: "正在读取短信列表；未读短信可能被模块标记为已读，但不会删除。"});
-      const data = await api("/api/sms/inbox", {}, 45000);
-      setRaw("inbox-output", data);
-      setStatus("inbox-status", data.ok ? "收件箱已刷新" : (data.message || "读取失败"), data.ok);
+      setStatus("inbox-status", "正在读取当前模块短信", true);
+      const data = await api("/api/messages/current", {}, 45000);
+      renderCurrentMessages(data.messages || []);
+      setStatus("inbox-status", data.ok ? `当前模块已刷新：${(data.messages || []).length} 条` : (data.message || "读取失败"), data.ok);
+      await refreshHistory();
       await refreshOverview();
     });
 
-    $("read-sms").addEventListener("click", async () => {
-      const index = smsIndex();
+    async function readCurrentMessage(index) {
       setStatus("inbox-status", `正在读取短信 ${index}...`, true);
-      const data = await api(`/api/sms/messages/${encodeURIComponent(index)}`);
-      setRaw("inbox-output", data);
+      const data = await api(`/api/messages/current/${encodeURIComponent(index)}`);
+      if (data.ok && data.message) showMessageDetail(data.message);
       setStatus("inbox-status", data.ok ? "短信已读取" : (data.message || "读取失败"), data.ok);
+      await refreshHistory();
       await refreshOverview();
-    });
+    }
 
     $("delete-sms").addEventListener("click", async () => {
-      const index = smsIndex();
+      const index = selectedModuleIndex;
+      if (!index) return;
       if (!window.confirm(`只删除索引 ${index} 这一条短信，是否继续？`)) return;
       const token = window.prompt("请输入 DELETE_SMS 进行二次确认");
       setStatus("inbox-status", `正在删除短信 ${index}...`, true);
@@ -629,8 +798,33 @@
         method: "POST",
         body: JSON.stringify({index, confirm: token || ""})
       });
-      setRaw("inbox-output", data);
       setStatus("inbox-status", data.ok ? "短信已删除" : (data.message || "删除失败"), data.ok);
+      if (data.ok) {
+        selectedModuleIndex = "";
+        $("delete-sms").disabled = true;
+        $("message-detail").textContent = "已从当前模块删除；本地历史仍可追溯。";
+        $("message-detail-status").textContent = "删除完成";
+        $("refresh-inbox").click();
+      }
+      await refreshOverview();
+    });
+
+    $("refresh-history").addEventListener("click", refreshHistory);
+    $("history-direction").addEventListener("change", refreshHistory);
+
+    $("send-message").addEventListener("click", async () => {
+      const phone = $("message-phone").value.trim();
+      const message = $("message-body").value.trim();
+      if (!window.confirm(`将向 ${phone || "(未填写号码)"} 发送一条真实短信，是否继续？`)) return;
+      const token = window.prompt("请输入 SEND_SMS 进行二次确认");
+      setStatus("message-send-status", "正在发送短信", true);
+      const data = await api("/api/messages/send", {
+        method: "POST",
+        body: JSON.stringify({phone, message, confirm: token || ""})
+      }, 45000);
+      setStatus("message-send-status", data.ok ? "短信已发送并写入本地历史" : (data.message || "发送失败"), data.ok);
+      if (data.ok && data.message && typeof data.message === "object") showMessageDetail(data.message);
+      await refreshHistory();
       await refreshOverview();
     });
 
@@ -639,7 +833,11 @@
       $("sms-gate").textContent = health.sms_enabled ? "已启用" : "短信测试默认关闭";
       $("sms-gate").classList.toggle("ok", health.sms_enabled);
       $("send-test-sms").disabled = !health.sms_enabled;
+      $("message-send-gate").textContent = health.sms_enabled ? "发送已启用" : "发送默认关闭";
+      $("message-send-gate").classList.toggle("ok", health.sms_enabled);
+      $("send-message").disabled = !health.sms_enabled;
       await refreshOverview();
+      await refreshHistory();
     }
 
     boot().catch((error) => {

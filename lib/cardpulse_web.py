@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
+import threading
+import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -22,6 +26,15 @@ DEFAULT_TIMEOUT = 45
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 CONTROL_RE = re.compile(r"[\r\n\x00-\x1f\x7f]")
+MESSAGE_BLOCK_KEYS = {
+    "index",
+    "status",
+    "from",
+    "to",
+    "time",
+    "preview",
+    "message",
+}
 READONLY_AT_COMMANDS = {
     "AT",
     "ATI",
@@ -39,6 +52,8 @@ READONLY_AT_COMMANDS = {
     "AT+QCCID",
     "AT+CCID",
 }
+PHONE_RE = re.compile(r"^\+?[0-9][0-9 -]{4,30}[0-9]$")
+MAX_WEB_SMS_LENGTH = 612
 
 DEFAULT_HTML = """<!doctype html>
 <html lang="en">
@@ -146,6 +161,187 @@ def parse_sms_status_summary(parsed: dict[str, str]) -> dict[str, Any]:
         "message_indication": first_parsed_value(parsed, ("new_message_indication",)),
         "message_format": first_parsed_value(parsed, ("format",)),
     }
+
+
+def parse_message_blocks(output: str) -> list[dict[str, str]]:
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    last_key = ""
+    for raw_line in strip_ansi(output).splitlines():
+        line = raw_line.rstrip()
+        if not line or line.startswith("==="):
+            if current:
+                blocks.append(current)
+                current = {}
+                last_key = ""
+            continue
+        if last_key == "message" and current:
+            current[last_key] = current[last_key] + "\n" + line.strip()
+            continue
+        if ":" not in line:
+            if current and last_key == "preview":
+                current[last_key] = current[last_key] + "\n" + line.strip()
+            continue
+        key, value = line.split(":", 1)
+        normalized = key.strip().lower().replace(" ", "_")
+        if current and last_key == "preview" and normalized not in MESSAGE_BLOCK_KEYS:
+            current[last_key] = current[last_key] + "\n" + line.strip()
+            continue
+        if normalized:
+            current[normalized] = value.strip()
+            last_key = normalized
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def message_id(direction: str, phone: str, timestamp: str, body: str, index: str = "") -> str:
+    source = "\x1f".join([direction, phone, timestamp, body, index])
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+
+def module_message_id(direction: str, phone: str, timestamp: str, index: str) -> str:
+    return message_id(direction, phone, timestamp, "", index)
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def unique_message_id(direction: str, phone: str, timestamp: str, body: str, index: str = "") -> str:
+    return message_id(direction, phone, timestamp, body, index or uuid.uuid4().hex)
+
+
+def validate_web_sms(phone: str, message_text: str) -> str:
+    if not phone:
+        return "phone is required"
+    if not PHONE_RE.match(phone):
+        return "phone must be an international-style number"
+    if not message_text:
+        return "message is required"
+    if len(message_text) > MAX_WEB_SMS_LENGTH:
+        return f"message must be {MAX_WEB_SMS_LENGTH} characters or fewer"
+    if CONTROL_RE.search(message_text):
+        return "message must not contain control characters"
+    return ""
+
+
+def normalize_inbox_entry(entry: dict[str, str]) -> dict[str, Any]:
+    index = entry.get("index", "")
+    sender = entry.get("from", "")
+    timestamp = entry.get("time", "")
+    preview = entry.get("preview", "")
+    status = entry.get("status", "")
+    return {
+        "id": module_message_id("inbound", sender, timestamp, index),
+        "index": index,
+        "direction": "inbound",
+        "from": sender,
+        "to": "",
+        "phone": sender,
+        "time": timestamp,
+        "status": status,
+        "preview": preview,
+        "body": preview,
+        "storage": "module",
+        "source": "receive",
+    }
+
+
+def normalize_sms_message(entry: dict[str, str], *, index: str) -> dict[str, Any]:
+    sender = entry.get("from", "")
+    timestamp = entry.get("time", "")
+    body = entry.get("message", entry.get("preview", ""))
+    status = entry.get("status", "")
+    return {
+        "id": module_message_id("inbound", sender, timestamp, index),
+        "index": index,
+        "direction": "inbound",
+        "from": sender,
+        "to": "",
+        "phone": sender,
+        "time": timestamp,
+        "status": status,
+        "preview": body[:80] + ("..." if len(body) > 80 else ""),
+        "body": body,
+        "storage": "module",
+        "source": "receive",
+    }
+
+
+class MessageHistory:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path) if path else None
+        self._messages: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path or not self.path.exists():
+            return
+        for raw_line in self.path.read_text(encoding="utf-8").splitlines():
+            if not raw_line.strip():
+                continue
+            try:
+                data = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and data.get("id"):
+                self._messages[str(data["id"])] = data
+
+    def _persist(self, message: dict[str, Any]) -> None:
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(message, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def _rewrite(self) -> None:
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for message in self._messages.values():
+                handle.write(json.dumps(message, ensure_ascii=False, sort_keys=True) + "\n")
+        tmp_path.replace(self.path)
+
+    def add(self, message: dict[str, Any]) -> dict[str, Any]:
+        stored = dict(message)
+        stored.setdefault("id", message_id(
+            str(stored.get("direction", "")),
+            str(stored.get("phone", "")),
+            str(stored.get("time", "")),
+            str(stored.get("body", "")),
+            str(stored.get("index", "")),
+        ))
+        with self._lock:
+            existing = self._messages.get(stored["id"])
+            if existing:
+                merged = dict(existing)
+                merged.update({key: value for key, value in stored.items() if value not in ("", None)})
+                if stored.get("body") and len(str(stored.get("body", ""))) >= len(str(existing.get("body", ""))):
+                    merged["body"] = stored["body"]
+                    merged["preview"] = stored.get("preview") or existing.get("preview", "")
+                self._messages[stored["id"]] = merged
+                if merged != existing:
+                    self._rewrite()
+                return merged
+            self._messages[stored["id"]] = stored
+            self._persist(stored)
+            return stored
+
+    def list(self, direction: str = "") -> list[dict[str, Any]]:
+        with self._lock:
+            messages = list(self._messages.values())
+        if direction in {"inbound", "outbound"}:
+            messages = [item for item in messages if item.get("direction") == direction]
+        return sorted(messages, key=lambda item: (str(item.get("time", "")), str(item.get("id", ""))))
+
+    def get(self, message_id_value: str) -> dict[str, Any] | None:
+        with self._lock:
+            item = self._messages.get(message_id_value)
+            return dict(item) if item else None
 
 
 def severity_rank(value: str) -> int:
@@ -420,6 +616,48 @@ at_send "$CARDPULSE_WEB_AT_CMD" "$CARDPULSE_WEB_AT_TIMEOUT"
         )
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
+    def send_message(self, phone: str, message: str) -> CommandResult:
+        script = r'''
+set -euo pipefail
+ROOT_DIR="${CARDPULSE_ROOT_DIR:?}"
+source "$ROOT_DIR/lib/config_reader.sh"
+source "$ROOT_DIR/lib/at_modem.sh"
+source "$ROOT_DIR/lib/sms_sender.sh"
+cleanup() {
+    at_close 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+config_init
+device="$(sms_detect_device || true)"
+if [[ -z "$device" ]]; then
+    echo "[ERROR] No AT serial port found." >&2
+    exit 2
+fi
+baudrate="$(config_read ".serial.baudrate" "115200")"
+if ! at_init "$device" "$baudrate"; then
+    echo "[ERROR] Failed to open serial port." >&2
+    exit 3
+fi
+if ! sms_validate_preconditions; then
+    exit 4
+fi
+sms_send_with_retry "$CARDPULSE_WEB_SMS_PHONE" "$CARDPULSE_WEB_SMS_MESSAGE"
+'''
+        env = self._env()
+        env["CARDPULSE_ROOT_DIR"] = str(self.root_dir)
+        env["CARDPULSE_WEB_SMS_PHONE"] = phone
+        env["CARDPULSE_WEB_SMS_MESSAGE"] = message
+        completed = subprocess.run(
+            ["bash", "-c", script],
+            cwd=str(self.root_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=self.timeout,
+            check=False,
+        )
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
 
 def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or "0")
@@ -440,7 +678,10 @@ def make_handler(
     runner: CardPulseRunner,
     ui_path: Optional[Path],
     allow_sms: bool,
+    history_path: Optional[Path] = None,
 ) -> type[BaseHTTPRequestHandler]:
+    history = MessageHistory(history_path)
+
     class CardPulseWebHandler(BaseHTTPRequestHandler):
         server_version = "CardPulseWeb/0.1"
 
@@ -470,7 +711,8 @@ def make_handler(
             self.wfile.write(body)
 
         def do_GET(self) -> None:  # noqa: N802
-            path = urlparse(self.path).path
+            parsed_url = urlparse(self.path)
+            path = parsed_url.path
             try:
                 if path in ("", "/"):
                     self.send_html()
@@ -514,6 +756,22 @@ def make_handler(
                         self.send_json(400, {"ok": False, "message": "SMS index must be a single non-negative integer"})
                         return
                     self.send_json(200, result_payload(runner.run_cardpulse(["--read-sms", index])))
+                elif path == "/api/messages/current":
+                    self.handle_current_messages()
+                elif path.startswith("/api/messages/current/"):
+                    index = path.rsplit("/", 1)[-1]
+                    self.handle_current_message(index)
+                elif path == "/api/messages/history":
+                    params = parse_qs(parsed_url.query)
+                    direction = params.get("direction", [""])[0]
+                    self.send_json(200, {"ok": True, "messages": history.list(direction)})
+                elif path.startswith("/api/messages/history/"):
+                    item_id = path.rsplit("/", 1)[-1]
+                    item = history.get(item_id)
+                    if not item:
+                        self.send_json(404, {"ok": False, "message": "message not found"})
+                        return
+                    self.send_json(200, {"ok": True, "message": item})
                 else:
                     self.send_json(404, {"ok": False, "message": "not found"})
             except subprocess.TimeoutExpired:
@@ -531,6 +789,8 @@ def make_handler(
                     self.handle_at(data)
                 elif path == "/api/sms/delete":
                     self.handle_delete_sms(data)
+                elif path == "/api/messages/send":
+                    self.handle_send_message(data)
                 else:
                     self.send_json(404, {"ok": False, "message": "not found"})
             except ValueError as exc:
@@ -572,6 +832,70 @@ def make_handler(
                 return
             self.send_json(200, result_payload(runner.run_cardpulse(["--delete-sms", index, "--confirm", "DELETE_SMS"])))
 
+        def handle_current_messages(self) -> None:
+            result = runner.run_cardpulse(["--inbox"])
+            payload = result_payload(result)
+            messages = [normalize_inbox_entry(entry) for entry in parse_message_blocks(result.output)]
+            if result.ok:
+                for message in messages:
+                    history.add(message)
+            payload.update({
+                "source": "module",
+                "messages": messages,
+            })
+            self.send_json(200, payload)
+
+        def handle_current_message(self, index: str) -> None:
+            if not is_sms_index(index):
+                self.send_json(400, {"ok": False, "message": "SMS index must be a single non-negative integer"})
+                return
+            result = runner.run_cardpulse(["--read-sms", index])
+            payload = result_payload(result)
+            blocks = parse_message_blocks(result.output)
+            if result.ok and blocks:
+                message = normalize_sms_message(blocks[0], index=index)
+                history.add(message)
+                payload["message"] = message
+            elif result.ok:
+                payload["ok"] = False
+                payload["message"] = "SMS read succeeded but no parseable message was returned"
+            self.send_json(200, payload)
+
+        def handle_send_message(self, data: dict[str, Any]) -> None:
+            if not allow_sms:
+                self.send_json(403, {"ok": False, "message": "SMS sending is disabled on this server"})
+                return
+            if data.get("confirm") != "SEND_SMS":
+                self.send_json(400, {"ok": False, "message": "Message send requires confirmation token SEND_SMS"})
+                return
+            phone = str(data.get("phone", "")).strip()
+            message_text = str(data.get("message", "")).strip()
+            validation_error = validate_web_sms(phone, message_text)
+            if validation_error:
+                self.send_json(400, {"ok": False, "message": validation_error})
+                return
+            result = runner.send_message(phone, message_text)
+            payload = result_payload(result)
+            sent_at = utc_timestamp()
+            outbound = {
+                "id": unique_message_id("outbound", phone, sent_at, message_text),
+                "index": "",
+                "direction": "outbound",
+                "from": "",
+                "to": phone,
+                "phone": phone,
+                "time": sent_at,
+                "status": "SENT" if result.ok else "FAILED",
+                "preview": message_text[:80] + ("..." if len(message_text) > 80 else ""),
+                "body": message_text,
+                "storage": "history",
+                "source": "send",
+            }
+            if result.ok:
+                history.add(outbound)
+            payload["message"] = outbound
+            self.send_json(200 if result.ok else 500, payload)
+
     return CardPulseWebHandler
 
 
@@ -589,13 +913,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     root_dir = Path(args.root).resolve()
     ui_path = root_dir / "web" / "index.html"
     allow_sms = args.allow_sms or os.environ.get("CARDPULSE_WEB_ALLOW_SMS") == "1"
+    history_path = Path(
+        os.environ.get(
+            "CARDPULSE_WEB_HISTORY_PATH",
+            str(Path(os.environ.get("CARDPULSE_STATE_DIR", str(root_dir / "state"))) / "messages.jsonl"),
+        )
+    )
     runner = CardPulseRunner(root_dir=root_dir)
-    handler = make_handler(runner=runner, ui_path=ui_path, allow_sms=allow_sms)
+    handler = make_handler(runner=runner, ui_path=ui_path, allow_sms=allow_sms, history_path=history_path)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     url = f"http://{args.host}:{args.port}"
     print(f"CardPulse Web listening on {url}")
     if not allow_sms:
-        print("SMS test action is disabled. Start with --allow-sms to enable the guarded test endpoint.")
+        print("SMS sending actions are disabled. Start with --allow-sms to enable guarded SMS endpoints.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -19,6 +20,7 @@ class FakeRunner:
     def __init__(self):
         self.commands = []
         self.at_commands = []
+        self.sent_messages = []
 
     def run_cardpulse(self, args):
         self.commands.append(list(args))
@@ -68,9 +70,43 @@ class FakeRunner:
                 "",
             )
         if args == ["--inbox"]:
-            return cardpulse_web.CommandResult(0, "Index: 1\nFrom: +8613025523391\nPreview: OK", "")
+            return cardpulse_web.CommandResult(
+                0,
+                "=== SMS inbox ===\n"
+                "Index: 1\n"
+                "Status: REC READ\n"
+                "From: +8613025523391\n"
+                "Time: 2026-07-09 11:03:04\n"
+                "Preview: OK\n\n"
+                "Index: 2\n"
+                "Status: REC UNREAD\n"
+                "From: +447700900123\n"
+                "Time: 2026-07-09 11:04:05\n"
+                "Preview: Hello from phone\n",
+                "",
+            )
         if args == ["--read-sms", "1"]:
-            return cardpulse_web.CommandResult(0, "Index: 1\nMessage: OK", "")
+            return cardpulse_web.CommandResult(
+                0,
+                "=== SMS message ===\n"
+                "Index: 1\n"
+                "Status: REC READ\n"
+                "From: +8613025523391\n"
+                "Time: 2026-07-09 11:03:04\n"
+                "Message: OK\n",
+                "",
+            )
+        if args == ["--read-sms", "2"]:
+            return cardpulse_web.CommandResult(
+                0,
+                "=== SMS message ===\n"
+                "Index: 2\n"
+                "Status: REC UNREAD\n"
+                "From: +447700900123\n"
+                "Time: 2026-07-09 11:04:05\n"
+                "Message: Hello from phone\n",
+                "",
+            )
         if args == ["--delete-sms", "1", "--confirm", "DELETE_SMS"]:
             return cardpulse_web.CommandResult(0, "Deleted SMS index: 1", "")
         return cardpulse_web.CommandResult(0, "ran " + " ".join(args), "")
@@ -78,6 +114,10 @@ class FakeRunner:
     def run_at(self, cmd, timeout):
         self.at_commands.append((cmd, timeout))
         return cardpulse_web.CommandResult(0, "OK", "")
+
+    def send_message(self, phone, message):
+        self.sent_messages.append((phone, message))
+        return cardpulse_web.CommandResult(0, "Message reference: 42", "")
 
 
 class FailingSmsStatusRunner(FakeRunner):
@@ -88,13 +128,22 @@ class FailingSmsStatusRunner(FakeRunner):
         return super().run_cardpulse(args)
 
 
+class UnparseableReadSmsRunner(FakeRunner):
+    def run_cardpulse(self, args):
+        if args == ["--read-sms", "9"]:
+            self.commands.append(list(args))
+            return cardpulse_web.CommandResult(0, "raw modem output without message fields", "")
+        return super().run_cardpulse(args)
+
+
 class WebAPITestCase(unittest.TestCase):
-    def start_server(self, allow_sms=False, runner=None):
+    def start_server(self, allow_sms=False, runner=None, history_path=None):
         runner = runner or FakeRunner()
         handler = cardpulse_web.make_handler(
             runner=runner,
             ui_path=None,
             allow_sms=allow_sms,
+            history_path=history_path,
         )
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -156,9 +205,17 @@ class WebAPITestCase(unittest.TestCase):
 
         self.assertIn('data-view="inbox"', html)
         self.assertIn("/api/overview", html)
+        self.assertIn("/api/messages/current", html)
+        self.assertIn("/api/messages/history", html)
+        self.assertIn("/api/messages/send", html)
         self.assertIn("/api/sms/status", html)
         self.assertIn("/api/sms/inbox", html)
         self.assertIn("/api/sms/delete", html)
+        self.assertIn("消息中心", html)
+        self.assertIn("当前模块", html)
+        self.assertIn("本地历史", html)
+        self.assertIn("发送短信", html)
+        self.assertIn("方向筛选", html)
         self.assertIn("短信收件箱", html)
         self.assertIn("设备连接", html)
         self.assertIn("SIM / 网络", html)
@@ -169,6 +226,11 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("只删除明确无用的单条短信", html)
         self.assertIn("短信存储已满", html)
         self.assertIn("DELETE_SMS", html)
+        self.assertIn("SEND_SMS", html)
+        self.assertIn("function renderCurrentMessages", html)
+        self.assertIn("function renderHistoryMessages", html)
+        self.assertIn("function showMessageDetail", html)
+        self.assertIn('data.ok && data.message && typeof data.message === "object"', html)
         self.assertIn("function applyOverview", html)
 
     def test_windows_recovery_script_verifies_doctor_and_keeps_sms_disabled_by_default(self):
@@ -332,6 +394,249 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("Message: OK", data["output"])
 
         self.assertEqual(runner.commands, [["--sms-status"], ["--inbox"], ["--read-sms", "1"]])
+
+    def test_message_center_lists_current_module_messages_and_records_history(self):
+        server, runner = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/messages/current")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["source"], "module")
+        self.assertEqual(len(data["messages"]), 2)
+        self.assertEqual(data["messages"][0]["index"], "1")
+        self.assertEqual(data["messages"][0]["direction"], "inbound")
+        self.assertEqual(data["messages"][0]["from"], "+8613025523391")
+        self.assertEqual(data["messages"][0]["time"], "2026-07-09 11:03:04")
+        self.assertEqual(data["messages"][0]["preview"], "OK")
+        self.assertEqual(data["messages"][0]["storage"], "module")
+
+        history_status, history = self.request(server, "GET", "/api/messages/history")
+        self.assertEqual(history_status, 200)
+        self.assertTrue(history["ok"])
+        self.assertEqual(len(history["messages"]), 2)
+        self.assertEqual(history["messages"][1]["body"], "Hello from phone")
+
+    def test_message_center_reads_one_current_message_with_full_body(self):
+        server, runner = self.start_server()
+
+        status, data = self.request(server, "GET", "/api/messages/current/2")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["message"]["index"], "2")
+        self.assertEqual(data["message"]["direction"], "inbound")
+        self.assertEqual(data["message"]["body"], "Hello from phone")
+        self.assertEqual(data["message"]["storage"], "module")
+        self.assertEqual(runner.commands, [["--read-sms", "2"]])
+
+    def test_message_center_does_not_fake_empty_message_when_read_unparseable(self):
+        server, runner = self.start_server(runner=UnparseableReadSmsRunner())
+
+        status, data = self.request(server, "GET", "/api/messages/current/9")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(data["ok"])
+        self.assertNotIn("direction", data.get("message", {}))
+        self.assertIn("no parseable message", data["message"])
+        self.assertEqual(runner.commands, [["--read-sms", "9"]])
+
+    def test_message_history_merges_module_preview_and_full_body(self):
+        server, _ = self.start_server()
+
+        list_status, listed = self.request(server, "GET", "/api/messages/current")
+        read_status, read = self.request(server, "GET", "/api/messages/current/2")
+        history_status, history = self.request(server, "GET", "/api/messages/history")
+
+        self.assertEqual(list_status, 200)
+        self.assertEqual(read_status, 200)
+        self.assertEqual(history_status, 200)
+        self.assertTrue(listed["ok"])
+        self.assertTrue(read["ok"])
+        matching = [
+            item for item in history["messages"]
+            if item["index"] == "2" and item["phone"] == "+447700900123"
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["body"], "Hello from phone")
+
+    def test_message_parser_preserves_multiline_sms_body(self):
+        output = (
+            "=== SMS message ===\n"
+            "Index: 8\n"
+            "Status: REC READ\n"
+            "From: +447700900123\n"
+            "Time: 2026-07-09 12:00:00\n"
+            "Message: first line\n"
+            "second line without a colon\n"
+            "OTP: 123456\n"
+            "From: Alice\n"
+            "Time: 10:30\n"
+            "Status: paid\n"
+            "Preview: quoted text\n"
+            "third line\n"
+        )
+
+        blocks = cardpulse_web.parse_message_blocks(output)
+        message = cardpulse_web.normalize_sms_message(blocks[0], index="8")
+
+        self.assertEqual(
+            message["body"],
+            "first line\n"
+            "second line without a colon\n"
+            "OTP: 123456\n"
+            "From: Alice\n"
+            "Time: 10:30\n"
+            "Status: paid\n"
+            "Preview: quoted text\n"
+            "third line",
+        )
+
+    def test_message_history_filters_by_direction(self):
+        server, _ = self.start_server(allow_sms=True)
+
+        send_status, sent = self.request(
+            server,
+            "POST",
+            "/api/messages/send",
+            {"phone": "+8613025523391", "message": "Outbound hello", "confirm": "SEND_SMS"},
+        )
+        self.assertEqual(send_status, 200)
+        self.assertTrue(sent["ok"])
+
+        self.request(server, "GET", "/api/messages/current/1")
+        status, data = self.request(server, "GET", "/api/messages/history?direction=outbound")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["messages"]), 1)
+        self.assertEqual(data["messages"][0]["direction"], "outbound")
+        self.assertEqual(data["messages"][0]["body"], "Outbound hello")
+
+    def test_message_history_preserves_duplicate_outbound_sends(self):
+        server, runner = self.start_server(allow_sms=True)
+
+        for _ in range(2):
+            status, data = self.request(
+                server,
+                "POST",
+                "/api/messages/send",
+                {"phone": "+8613025523391", "message": "Repeat hello", "confirm": "SEND_SMS"},
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(data["ok"])
+
+        status, history = self.request(server, "GET", "/api/messages/history?direction=outbound")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(history["messages"]), 2)
+        self.assertEqual(runner.sent_messages, [
+            ("+8613025523391", "Repeat hello"),
+            ("+8613025523391", "Repeat hello"),
+        ])
+
+    def test_message_history_persists_to_local_jsonl_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history_path = Path(tmpdir) / "messages.jsonl"
+            server, _ = self.start_server(history_path=history_path)
+
+            status, data = self.request(server, "GET", "/api/messages/current/2")
+            self.assertEqual(status, 200)
+            self.assertTrue(data["ok"])
+
+            self.assertTrue(history_path.exists())
+            lines = history_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            persisted = json.loads(lines[0])
+            self.assertEqual(persisted["direction"], "inbound")
+            self.assertEqual(persisted["body"], "Hello from phone")
+
+            server.shutdown()
+            server.server_close()
+            server, _ = self.start_server(history_path=history_path)
+            history_status, history = self.request(server, "GET", "/api/messages/history")
+
+            self.assertEqual(history_status, 200)
+            self.assertTrue(history["ok"])
+            self.assertEqual(len(history["messages"]), 1)
+            self.assertEqual(history["messages"][0]["body"], "Hello from phone")
+
+    def test_message_history_persists_full_body_after_preview_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history_path = Path(tmpdir) / "messages.jsonl"
+            server, _ = self.start_server(history_path=history_path)
+
+            list_status, listed = self.request(server, "GET", "/api/messages/current")
+            read_status, read = self.request(server, "GET", "/api/messages/current/2")
+
+            self.assertEqual(list_status, 200)
+            self.assertEqual(read_status, 200)
+            self.assertTrue(listed["ok"])
+            self.assertTrue(read["ok"])
+
+            server.shutdown()
+            server.server_close()
+            server, _ = self.start_server(history_path=history_path)
+            history_status, history = self.request(server, "GET", "/api/messages/history")
+
+            self.assertEqual(history_status, 200)
+            matching = [
+                item for item in history["messages"]
+                if item["index"] == "2" and item["phone"] == "+447700900123"
+            ]
+            self.assertEqual(len(matching), 1)
+            self.assertEqual(matching[0]["body"], "Hello from phone")
+
+    def test_message_send_requires_gate_confirmation_and_payload(self):
+        server, runner = self.start_server(allow_sms=False)
+
+        status, data = self.request(
+            server,
+            "POST",
+            "/api/messages/send",
+            {"phone": "+8613025523391", "message": "No send", "confirm": "SEND_SMS"},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("disabled", data["message"])
+        self.assertEqual(runner.sent_messages, [])
+
+        server, runner = self.start_server(allow_sms=True)
+        status, data = self.request(
+            server,
+            "POST",
+            "/api/messages/send",
+            {"phone": "+8613025523391", "message": "No send", "confirm": "WRONG"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("SEND_SMS", data["message"])
+        self.assertEqual(runner.sent_messages, [])
+
+        status, data = self.request(
+            server,
+            "POST",
+            "/api/messages/send",
+            {"phone": "", "message": "No send", "confirm": "SEND_SMS"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("phone", data["message"].lower())
+
+        status, data = self.request(
+            server,
+            "POST",
+            "/api/messages/send",
+            {"phone": "not-a-phone", "message": "No send", "confirm": "SEND_SMS"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("phone", data["message"].lower())
+
+        status, data = self.request(
+            server,
+            "POST",
+            "/api/messages/send",
+            {"phone": "+8613025523391", "message": "bad\nbody", "confirm": "SEND_SMS"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("control", data["message"].lower())
 
     def test_sms_delete_api_requires_single_index_and_confirmation(self):
         server, runner = self.start_server()
