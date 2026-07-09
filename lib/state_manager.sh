@@ -219,7 +219,7 @@ state_show_status() {
     if [[ -f "$history_file" ]]; then
         echo ""
         echo "=== Recent history ==="
-        tail -5 "$history_file" | while IFS='|' read -r ts date status; do
+        tail -5 "$history_file" | while IFS='|' read -r _ts date status; do
             echo "  $date - $status"
         done
     fi

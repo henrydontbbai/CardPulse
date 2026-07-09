@@ -19,7 +19,7 @@ _curl_secure() {
         echo "[WARN] curl URL 协议不受支持，仅允许 http/https" >&2
         return 1
     fi
-    if [[ "$url" == *$'\n'* || "$url" == *$'\r'* || "$url" == *'"'* || "$url" == *'\\'* ]]; then
+    if [[ "$url" == *$'\n'* || "$url" == *$'\r'* || "$url" == *\"* || "$url" == *\\* ]]; then
         echo "[WARN] curl URL 包含非法字符，已拒绝请求" >&2
         return 1
     fi
@@ -75,7 +75,8 @@ notify_send() {
 
     local phone_masked
     phone_masked=$(config_mask_string "$phone")
-    local notify_msg="【CardPulse】保号短信${status_text}\n设备: ${device}\n号码: ${phone_masked}\n时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    local notify_msg
+    notify_msg="【CardPulse】保号短信${status_text}\n设备: ${device}\n号码: ${phone_masked}\n时间: $(date '+%Y-%m-%d %H:%M:%S')"
 
     notify_telegram "$notify_msg" || true
     notify_wechat "$notify_msg" || true
@@ -444,7 +445,8 @@ notify_email() {
     local subject="CardPulse 保号短信${status}"
     local phone_masked
     phone_masked=$(config_mask_string "$phone")
-    local body="设备: ${device}\n号码: ${phone_masked}\n时间: $(date '+%Y-%m-%d %H:%M:%S')\n短信内容长度: ${#message} 字符"
+    local body
+    body="设备: ${device}\n号码: ${phone_masked}\n时间: $(date '+%Y-%m-%d %H:%M:%S')\n短信内容长度: ${#message} 字符"
 
     local netrc_dir
     local netrc_file
@@ -498,7 +500,8 @@ notify_test() {
 
     echo "[INFO] 测试通知发送..." >&2
 
-    local test_msg="【CardPulse】测试通知\n这是一条测试消息\n时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    local test_msg
+    test_msg="【CardPulse】测试通知\n这是一条测试消息\n时间: $(date '+%Y-%m-%d %H:%M:%S')"
 
     if [[ -n "$channel" ]]; then
         case "$channel" in

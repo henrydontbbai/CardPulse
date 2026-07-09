@@ -10,8 +10,10 @@ _SMS_SENDER_LOADED=1
 
 if ! command -v at_list_candidate_devices >/dev/null 2>&1; then
     if [[ -n "${CARDPULSE_LIB_DIR:-}" && -f "${CARDPULSE_LIB_DIR}/at_modem.sh" ]]; then
+        # shellcheck disable=SC1091
         source "${CARDPULSE_LIB_DIR}/at_modem.sh"
     else
+        # shellcheck disable=SC1091
         source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/at_modem.sh"
     fi
 fi
