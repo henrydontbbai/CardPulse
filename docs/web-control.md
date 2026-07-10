@@ -150,6 +150,12 @@ From a Windows PowerShell prompt in the CardPulse project root:
 powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 ```
 
+The verified hardware route uses `8766` by default:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1 -Port 8766
+```
+
 This performs the normal recovery path:
 
 - keeps `Ubuntu-24.04` alive

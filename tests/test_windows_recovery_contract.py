@@ -11,6 +11,13 @@ SCRIPT_PATH = ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1"
 
 
 class WindowsRecoveryContractTest(unittest.TestCase):
+    def test_real_recovery_defaults_to_port_8766(self):
+        script = SCRIPT_PATH.read_text(encoding="utf-8")
+        docs = (ROOT_DIR / "docs" / "web-control.md").read_text(encoding="utf-8")
+
+        self.assertIn('[int]$Port = 8766', script)
+        self.assertIn("start-dji-wsl-web.ps1 -Port 8766", docs)
+
     def test_bash_templates_are_literal_and_token_expanded(self):
         script = SCRIPT_PATH.read_text(encoding="utf-8")
 

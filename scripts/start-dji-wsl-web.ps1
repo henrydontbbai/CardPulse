@@ -2,7 +2,7 @@ param(
     [string]$Distro = "Ubuntu-24.04",
     [string]$BusId = "",
     [string]$HostBind = "0.0.0.0",
-    [int]$Port = 8765,
+    [int]$Port = 8766,
     [switch]$AllowSms
 )
 
