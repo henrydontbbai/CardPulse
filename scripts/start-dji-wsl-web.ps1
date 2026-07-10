@@ -3,8 +3,7 @@ param(
     [string]$BusId = "",
     [string]$HostBind = "0.0.0.0",
     [int]$Port = 8765,
-    [switch]$AllowSms,
-    [string]$SudoPassword = $env:CARDPULSE_WSL_SUDO_PASSWORD
+    [switch]$AllowSms
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,11 +13,32 @@ function Quote-Bash {
     return "'" + ($Value -replace "'", "'\''") + "'"
 }
 
+function Expand-LiteralTemplate {
+    param(
+        [string]$Template,
+        [hashtable]$Values
+    )
+
+    foreach ($key in $Values.Keys) {
+        $Template = $Template.Replace("@@$key@@", [string]$Values[$key])
+    }
+    return $Template
+}
+
 function Invoke-Wsl {
     param([string]$Command)
     & wsl.exe -d $Distro -- bash -lc $Command
     if ($LASTEXITCODE -ne 0) {
         throw "WSL command failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Invoke-WslInteractive {
+    param([string]$Command)
+
+    & wsl.exe -d $Distro -- bash -lc $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Interactive WSL command failed with exit code $LASTEXITCODE"
     }
 }
 
@@ -94,12 +114,63 @@ function Invoke-UsbipdAttach {
 
 function Invoke-WslCapture {
     param([string]$Command)
-    $output = & wsl.exe -d $Distro -- bash -lc $Command 2>&1
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & wsl.exe -d $Distro -- bash -lc $Command 2>&1
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($LASTEXITCODE -ne 0) {
         $message = ($output | ForEach-Object { $_.ToString() }) -join "`n"
         throw "WSL command failed with exit code $LASTEXITCODE`n$message"
     }
     return ($output | Select-Object -Last 100 | ForEach-Object { $_.ToString() }) -join "`n"
+}
+
+function Invoke-WslScriptCapture {
+    param([string]$Script)
+
+    $scriptBytes = [System.Text.Encoding]::UTF8.GetBytes($Script)
+    $scriptBase64 = [Convert]::ToBase64String($scriptBytes)
+    $scriptBase64Q = Quote-Bash $scriptBase64
+    $command = "printf '%s' $scriptBase64Q | base64 -d | bash"
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & wsl.exe -d $Distro -- bash -lc $command 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        $message = ($output | ForEach-Object { $_.ToString() }) -join "`n"
+        throw "WSL script failed with exit code $exitCode`n$message"
+    }
+    return ($output | Select-Object -Last 100 | ForEach-Object { $_.ToString() }) -join "`n"
+}
+
+function Assert-CardPulseWebPort {
+    param([int]$PortNumber)
+
+    $listener = $null
+    for ($attempt = 0; $attempt -lt 10; $attempt += 1) {
+        $listener = Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $listener) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)" -ErrorAction SilentlyContinue
+    $owner = if ($process) {
+        "$($process.Name) PID $($process.ProcessId): $($process.CommandLine)"
+    } else {
+        "PID $($listener.OwningProcess)"
+    }
+    throw "Port $PortNumber is already used by $owner. Stop that process or Use -Port with another local port."
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -127,55 +198,94 @@ $recoveryTempPathQ = Quote-Bash $recoveryTempPath
 function Write-RecoveryState {
     param(
         [string]$State,
+        [string]$Step,
+        [string]$PhaseStatus,
         [string]$Summary,
+        [string]$OperatorHint,
         [string]$PortValue = "",
-        [string]$WebUrl = ""
+        [string]$WebUrl = "",
+        [string]$BusIdValue = "",
+        [string]$DistroValue = $Distro
     )
 
+    $StateSafe = if ($null -eq $State) { "" } else { $State }
+    $StepSafe = if ($null -eq $Step) { "" } else { $Step }
+    $PhaseStatusSafe = if ($null -eq $PhaseStatus) { "" } else { $PhaseStatus }
+    $SummarySafe = if ($null -eq $Summary) { "" } else { $Summary }
+    $OperatorHintSafe = if ($null -eq $OperatorHint) { "" } else { $OperatorHint }
+    $PortSafe = if ($null -eq $PortValue) { "" } else { $PortValue }
+    $WebUrlSafe = if ($null -eq $WebUrl) { "" } else { $WebUrl }
+    $BusIdSafe = if ($null -eq $BusIdValue) { "" } else { $BusIdValue }
+    $DistroSafe = if ($null -eq $DistroValue) { "" } else { $DistroValue }
     $checkedAt = [DateTimeOffset]::UtcNow.ToString("o")
     $payload = [ordered]@{
-        state = ($State ?? "")
-        summary = ($Summary ?? "")
+        state = $StateSafe
+        step = $StepSafe
+        phase_status = $PhaseStatusSafe
+        summary = $SummarySafe
+        operator_hint = $OperatorHintSafe
         checked_at = $checkedAt
-        port = ($PortValue ?? "")
-        web_url = ($WebUrl ?? "")
+        port = $PortSafe
+        web_url = $WebUrlSafe
+        busid = $BusIdSafe
+        distro = $DistroSafe
     }
     $json = $payload | ConvertTo-Json -Depth 3
-
-    $writeScript = @"
-set -euo pipefail
-mkdir -p $stateDirQ
-tmp_path=$recoveryTempPathQ
-cat > $tmp_path <<'JSON'
-$json
-JSON
-mv $tmp_path $recoveryStatePathQ
-"@
+    $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $jsonBase64 = [Convert]::ToBase64String($jsonBytes)
+    $jsonBase64Q = Quote-Bash $jsonBase64
+    $writeScript = "set -euo pipefail; mkdir -p $stateDirQ; printf '%s' $jsonBase64Q | base64 -d > $recoveryTempPathQ; mv $recoveryTempPathQ $recoveryStatePathQ"
     & wsl.exe -d $Distro -- bash -lc $writeScript | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to write recovery state with exit code $LASTEXITCODE"
     }
 }
 
+function Set-RecoveryStage {
+    param(
+        [string]$Step,
+        [string]$PhaseStatus,
+        [string]$Summary,
+        [string]$OperatorHint = "",
+        [string]$PortValue = "",
+        [string]$WebUrl = "",
+        [string]$BusIdValue = ""
+    )
+
+    $script:CurrentRecoveryStep = $Step
+    $script:CurrentRecoveryHint = $OperatorHint
+    Write-RecoveryState -State "running" -Step $Step -PhaseStatus $PhaseStatus -Summary $Summary -OperatorHint $OperatorHint -PortValue $PortValue -WebUrl $WebUrl -BusIdValue $BusIdValue -DistroValue $Distro
+}
+
+$CurrentRecoveryStep = "init"
+$CurrentRecoveryHint = ""
+$TargetBusId = ""
+
+try {
+Set-RecoveryStage -Step "web-port" -PhaseStatus "checking" -Summary "Checking local Web port" -OperatorHint "Stop the conflicting process or choose another -Port value."
+Invoke-Wsl -Command "pkill -f '[s]cripts/cardpulse-web.py' 2>/dev/null || true"
+Assert-CardPulseWebPort -PortNumber $Port
+
 Write-Host "[1/7] Keeping WSL distro alive: $Distro"
+Set-RecoveryStage -Step "wsl" -PhaseStatus "running" -Summary "Keeping WSL distro alive"
 Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $Distro, "--", "bash", "-lc", "while true; do sleep 3600; done") -WindowStyle Hidden
 Start-Sleep -Seconds 1
 
+Set-RecoveryStage -Step "usbipd" -PhaseStatus "running" -Summary "Finding DJI/Baiwang USB device" -OperatorHint "If this fails, replug the module and make sure usbipd can see 2CA3:4006." -BusIdValue $BusId
 $TargetBusId = Resolve-DjiBusId -OverrideBusId $BusId
 Write-Host "[2/7] Sharing and attaching DJI/Baiwang USB device via usbipd: $TargetBusId"
 Write-Host "Using DJI/Baiwang USB BusId: $TargetBusId"
+Set-RecoveryStage -Step "usbipd" -PhaseStatus "running" -Summary "Sharing and attaching DJI/Baiwang USB device" -OperatorHint "If this fails, replug the module and make sure usbipd can see 2CA3:4006." -BusIdValue $TargetBusId
 Invoke-UsbipdBind -TargetBusId $TargetBusId
 Invoke-UsbipdAttach -TargetBusId $TargetBusId
 
 Write-Host "[3/7] Preparing stable CardPulse config in WSL: $configDir"
+Set-RecoveryStage -Step "config" -PhaseStatus "running" -Summary "Preparing stable CardPulse config" -BusIdValue $TargetBusId
 $configScript = @"
 set -euo pipefail
 mkdir -p $configDirQ $stateDirQ
 if [ ! -f $configDirQ/config.yaml ]; then
-  if [ -f /tmp/cardpulse-dji-test/config/config.yaml ]; then
-    cp /tmp/cardpulse-dji-test/config/config.yaml $configDirQ/config.yaml
-  else
-    cat > $configDirQ/config.yaml <<'YAML'
+  cat > $configDirQ/config.yaml <<'YAML'
 serial:
   port: /dev/ttyUSB2
   baudrate: 115200
@@ -191,48 +301,38 @@ retry:
 notify:
   enabled: false
 YAML
-  fi
 fi
 chmod 600 $configDirQ/config.yaml
 "@
 Invoke-Wsl -Command $configScript
 
-try {
-
 Write-Host "[4/7] Binding DJI/Baiwang module to Linux option serial driver"
-if ($SudoPassword) {
-    $sudoCmd = "printf '%s\n' $(Quote-Bash $SudoPassword) | sudo -S bash scripts/dji-qdc507-wsl-prepare.sh"
-} else {
-    $sudoCmd = "sudo -n bash scripts/dji-qdc507-wsl-prepare.sh"
-}
-
-try {
-    Invoke-Wsl -Command "cd $repoQ && $sudoCmd"
-} catch {
-    if (-not $SudoPassword) {
-        throw "WSL sudo needs a cached password. Run sudo once in Ubuntu, or re-run this script with -SudoPassword for local testing."
-    }
-    throw
-}
+Set-RecoveryStage -Step "driver" -PhaseStatus "running" -Summary "Binding DJI/Baiwang module to Linux option serial driver" -OperatorHint "Enter the Ubuntu sudo password when prompted; it is never stored by this script." -BusIdValue $TargetBusId
+Write-Host "WSL may prompt for the Ubuntu sudo password; it is used only by sudo."
+Invoke-WslInteractive -Command "cd $repoQ && sudo bash scripts/dji-qdc507-wsl-prepare.sh"
 
 Write-Host "[5/7] Verifying AT serial path and doctor output"
-$detectScript = @"
+Set-RecoveryStage -Step "doctor" -PhaseStatus "running" -Summary "Verifying AT serial path and doctor output" -OperatorHint "If this fails, check that /dev/ttyUSB* exists and one port answers AT." -BusIdValue $TargetBusId
+$detectScriptTemplate = @'
 set -euo pipefail
-CONFIG_DIR=$configDirQ
-cd $repoQ
-candidates=\$(ls /dev/ttyUSB* 2>/dev/null || true)
-if [ -z "\$candidates" ]; then
+CONFIG_DIR=@@CONFIG_DIR_Q@@
+cd @@REPO_Q@@
+candidates=$(ls /dev/ttyUSB* 2>/dev/null || true)
+if [ -z "$candidates" ]; then
   echo "[ERROR] No /dev/ttyUSB* port found after driver bind." >&2
   exit 21
 fi
 
 update_config_port() {
-  local device="\$1"
-  DEVICE_PORT="\$device" python3 - <<'PY'
+  local device="$1"
+  DEVICE_PORT="$device" CONFIG_DIR="$CONFIG_DIR" python3 - <<'PY'
 from pathlib import Path
 import os
-path = Path($configDirQ) / "config.yaml"
+
+path = Path(os.environ["CONFIG_DIR"]) / "config.yaml"
 text = path.read_text(encoding="utf-8")
+if len(text.splitlines()) <= 1 and "\\n" in text:
+    text = text.replace("\\r\\n", "\n").replace("\\n", "\n")
 lines = []
 in_serial = False
 for line in text.splitlines():
@@ -248,36 +348,42 @@ for line in text.splitlines():
     if stripped and not line.startswith((" ", "\t")):
         in_serial = False
     lines.append(line)
-path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
 doctor_output=""
 selected_device=""
-for device in \$candidates; do
-  update_config_port "\$device"
-  current_output=\$(env CARDPULSE_CONFIG_DIR=$configDirQ CARDPULSE_STATE_DIR=$stateDirQ bash bin/cardpulse --doctor 2>&1 || true)
-  printf '%s\n' "Trying AT serial port: \$device"
-  printf '%s\n' "\$current_output"
-  if printf '%s' "\$current_output" | grep -q "AT: OK" &&
-     printf '%s' "\$current_output" | grep -q "SIM: READY" &&
-     printf '%s\n' "\$current_output" | grep -Eq "^[[:space:]]*RSSI: ([0-9]|[1-8][0-9]|9[0-8])[[:space:]]*$" &&
-     printf '%s\n' "\$current_output" | grep -Eq "^[[:space:]]*Network registration: (1|5)[[:space:]]*$"; then
-    selected_device="\$device"
-    doctor_output="\$current_output"
+for device in $candidates; do
+  update_config_port "$device"
+  current_output=$(env CARDPULSE_CONFIG_DIR=@@CONFIG_DIR_Q@@ CARDPULSE_STATE_DIR=@@STATE_DIR_Q@@ bash bin/cardpulse --doctor 2>&1 || true)
+  actual_device=$(printf '%s\n' "$current_output" | sed -nE 's/^[[:space:]]*device:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p' | tail -n 1)
+  printf '%s\n' "Trying AT serial port: $device"
+  printf '%s\n' "$current_output"
+  if printf '%s' "$current_output" | grep -q "AT: OK" &&
+     printf '%s' "$current_output" | grep -q "SIM: READY" &&
+     printf '%s\n' "$current_output" | grep -Eq "^[[:space:]]*RSSI: ([0-9]|[1-8][0-9]|9[0-8])[[:space:]]*$" &&
+     printf '%s\n' "$current_output" | grep -Eq "^[[:space:]]*Network registration: (1|5)[[:space:]]*$"; then
+    selected_device="${actual_device:-$device}"
+    doctor_output="$current_output"
     break
   fi
 done
 
-if [ -z "\$selected_device" ]; then
+if [ -z "$selected_device" ]; then
   echo "[ERROR] cardpulse --doctor did not confirm AT: OK, SIM: READY, RSSI != 99, and Network registration: 1/5 on any /dev/ttyUSB* candidate." >&2
   exit 22
 fi
 
-printf '%s\n' "Detected AT serial port: \$selected_device"
-printf '%s\n' "\$doctor_output"
-"@
-$doctorOutput = Invoke-WslCapture -Command $detectScript
+printf '%s\n' "Detected AT serial port: $selected_device"
+printf '%s\n' "$doctor_output"
+'@
+$detectScript = (Expand-LiteralTemplate -Template $detectScriptTemplate -Values @{
+    CONFIG_DIR_Q = $configDirQ
+    REPO_Q = $repoQ
+    STATE_DIR_Q = $stateDirQ
+}).Replace("`r`n", "`n")
+$doctorOutput = Invoke-WslScriptCapture -Script $detectScript
 if ($doctorOutput -notmatch "Detected AT serial port") {
     throw "Unable to determine detected AT serial port.`n$doctorOutput"
 }
@@ -297,13 +403,14 @@ Write-Host $doctorOutput
 $detectedPort = ([regex]::Match($doctorOutput, "Detected AT serial port:\s*(\S+)")).Groups[1].Value
 
 Write-Host "[6/7] Starting CardPulse Web on http://127.0.0.1:$Port"
-Invoke-Wsl -Command "pkill -f '[s]cripts/cardpulse-web.py' 2>/dev/null || true"
+Set-RecoveryStage -Step "web" -PhaseStatus "starting" -Summary "Starting CardPulse Web" -PortValue $detectedPort -WebUrl "http://127.0.0.1:$Port" -BusIdValue $TargetBusId
 $allowSmsArg = if ($AllowSms) { " --allow-sms" } else { "" }
 $webCommand = "cd $repoQ; exec env CARDPULSE_CONFIG_DIR=$configDirQ CARDPULSE_STATE_DIR=$stateDirQ python3 scripts/cardpulse-web.py --host $HostBind --port $Port$allowSmsArg >> /tmp/cardpulse-web.log 2>&1"
 Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $Distro, "--", "bash", "-lc", $webCommand) -WindowStyle Hidden
 Start-Sleep -Seconds 2
 
 Write-Host "[7/7] Verifying Web and modem status"
+Set-RecoveryStage -Step "web" -PhaseStatus "checking" -Summary "Verifying Web and modem status" -PortValue $detectedPort -WebUrl "http://127.0.0.1:$Port" -BusIdValue $TargetBusId
 $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10
 $info = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/info" -TimeoutSec 35
 $overview = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/overview" -TimeoutSec 45
@@ -333,7 +440,7 @@ if (-not $overview.ok) {
 }
 
 $webUrl = "http://127.0.0.1:$Port"
-Write-RecoveryState -State "ok" -Summary "WSL 恢复成功" -PortValue $detectedPort -WebUrl $webUrl
+Write-RecoveryState -State "ok" -Step "web" -PhaseStatus "complete" -Summary "WSL 恢复成功" -OperatorHint "" -PortValue $detectedPort -WebUrl $webUrl -BusIdValue $TargetBusId -DistroValue $Distro
 
 if (-not $AllowSms) {
     Write-Host "SMS test remains disabled. Start with -AllowSms only when you intentionally want the guarded SMS test endpoint."
@@ -341,7 +448,7 @@ if (-not $AllowSms) {
 } catch {
     $errorMessage = $_.Exception.Message
     try {
-        Write-RecoveryState -State "error" -Summary $errorMessage
+        Write-RecoveryState -State "error" -Step $CurrentRecoveryStep -PhaseStatus "failed" -Summary $errorMessage -OperatorHint $CurrentRecoveryHint -BusIdValue $TargetBusId -DistroValue $Distro
     } catch {
     }
     throw

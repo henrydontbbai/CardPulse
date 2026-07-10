@@ -159,7 +159,7 @@ This performs the normal recovery path:
 
 The helper checks `usbipd list` before binding. If the device is already `Shared` or `Attached`, it skips `bind`; otherwise, the first `usbipd bind` for a device may require an elevated Windows PowerShell prompt. After the device is shared once, later recovery runs can usually attach it without elevation.
 
-If WSL `sudo` has no cached password, either run `sudo true` once inside Ubuntu first, or pass a local testing password with `-SudoPassword`. Do not store that password in the repository.
+When the Linux serial driver needs rebinding, the helper prompts in the current PowerShell window for the Ubuntu `sudo` password. The password is handled only by `sudo`; the script does not accept it as an argument or store it in the repository, environment, or recovery state.
 
 The script uses a stable WSL config path:
 
@@ -167,13 +167,15 @@ The script uses a stable WSL config path:
 ~/.cardpulse-dji/config/config.yaml
 ```
 
-If the stable config does not exist yet, it copies the existing `/tmp/cardpulse-dji-test/config/config.yaml` when available; otherwise it creates a safe local test config for `/dev/ttyUSB2`.
+If the stable config does not exist yet, the script creates a safe local test config for `/dev/ttyUSB2` under `~/.cardpulse-dji/`. It no longer depends on temporary test paths.
 
 The same recovery flow now writes the latest recovery result to:
 
 ```text
 ~/.cardpulse-dji/state/recovery.json
 ```
+
+The recovery file includes the latest `state`, `step`, `phase_status`, `summary`, `operator_hint`, `port`, `web_url`, `busid`, and `distro`. The Web overview uses these fields to show whether recovery is currently in USB attach, driver binding, AT doctor, or Web health verification.
 
 This file keeps a single latest-state snapshot for the Web overview page:
 

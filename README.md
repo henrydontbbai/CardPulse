@@ -253,7 +253,7 @@ Apple Silicon Mac 可以用 Ubuntu ARM64 虚拟机加 USB 直通验证 DJI 模�
 
 ## CardPulse Web 控制台
 
-CardPulse 现在提供一个轻量本地 Web 控制台，采用和 VoHive 类似的控制模式：浏览器调用本地 HTTP API，本地后端再调用 CardPulse CLI / AT 串口逻辑，网页本身不直接访问 USB。
+CardPulse 现在提供一个轻量本地 Web 控制台：浏览器访问本地 HTTP API，本地后端再调用 CardPulse CLI / AT 串口逻辑；网页本身不直接访问 USB。
 
 ```bash
 python3 scripts/cardpulse-web.py
@@ -265,22 +265,26 @@ python3 scripts/cardpulse-web.py
 python3 scripts/cardpulse-web.py --host 0.0.0.0 --port 8765
 ```
 
-Web 控制台默认只提供状态、诊断、设备信息和只读 AT 查询。真实测试短信默认关闭；如需启用，必须启动时显式加 `--allow-sms`，并在页面中二次输入 `SEND_SMS`。
-
-Windows + WSL 的 DJI/Baiwang 模块可用一键恢复脚本启动只读控制台：
+当前 DJI/Baiwang 模块的推荐主线路径是 **Windows 控制机 + WSL2 + 一键恢复脚本 + 本地 Web 运维面板**：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 ```
 
-脚本会从 `usbipd list` 自动查找 DJI/Baiwang `2CA3:4006` 的 BusId；只有需要手动覆盖时才传 `-BusId`。恢复验收会检查 AT、SIM READY、RSSI、网络注册和 Web 健康概览。
+Web 默认提供状态、诊断、消息中心和只读 AT 查询；真实短信发送默认关闭，只有显式启用后才开放受控发送。
 
-详见 [docs/web-control.md](docs/web-control.md)。
+`docs/web-control.md` 是这条 Windows + WSL + Web 运维路径的唯一主文档，集中说明：
+
+- 一键恢复脚本
+- `recovery.json` 恢复状态文件
+- Web 首页与消息中心
+- 日常检查顺序与短信删除安全约束
+
 产品定位与下一阶段方向见 [docs/product-direction.md](docs/product-direction.md)。
 
 ## 短信接收 / 收件箱
 
-CardPulse 现在提供安全收件箱命令：
+CardPulse 当前支持安全收件箱命令：
 
 ```bash
 cardpulse --sms-status
@@ -289,24 +293,9 @@ cardpulse --read-sms 1
 cardpulse --delete-sms 1 --confirm DELETE_SMS
 ```
 
-默认行为是只读：`--inbox` 和 `--read-sms` 不会删除短信，也不会把短信正文写入 CardPulse 状态文件。读取未读短信时，模块自身可能把该短信标记为已读。
+默认行为仍是只读：读取不会自动删除短信，也不会把短信正文写入状态文件；删除必须显式指定单条索引并输入 `DELETE_SMS`。
 
-DJI/Baiwang QDC507 已验证支持短信接收相关 AT 查询：`AT+CSMS?`、`AT+CPMS?`、`AT+CMGF?`、`AT+CNMI?`。如果 `--sms-status` 显示类似 `Storage: ME 23/23 FULL`，说明模块短信存储已满，需要先查看收件箱并手动删除无用短信，才能稳定接收新短信。
-
-删除短信必须显式指定单条索引，并提供确认令牌 `DELETE_SMS`；CardPulse 不提供自动清空或批量删除。
-
-Web 首页通过 `/api/overview` 汇总设备连接、SIM/网络、短信容量和保号任务，并给出“推荐动作”。收件箱页面仍坚持手动单条删除：只删除明确无用的短信，且必须输入 `DELETE_SMS`。
-
-当前 Windows + WSL + DJI/Baiwang QDC507 路线的日常检查顺序建议为：
-
-```bash
-cardpulse --doctor
-cardpulse --info
-cardpulse --sms-status
-cardpulse --inbox
-```
-
-如果短信存储显示 `ME 23/23 FULL`，先读取收件箱并只删除明确无用的一条旧短信，再测试接收新短信。当前实测模块在删除五条旧短信后为 `ME 18/23`，后续以实时 `--sms-status` 输出为准。
+关于 Web 消息中心、首页容量告警、恢复状态以及 Windows + WSL 日常运维顺序，统一见 [docs/web-control.md](docs/web-control.md)。
 
 ## License
 

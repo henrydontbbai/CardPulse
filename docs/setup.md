@@ -490,4 +490,6 @@ cardpulse --info
 
 如果要测试 VoHive/MBIM/QMI 路线，建议在 Apple Silicon Mac 上使用 Ubuntu ARM64 虚拟机并做 USB 直通；先只做 `/dev/cdc-wdm*`、`/dev/wwan*` 和驱动绑定检查，不要直接发短信。
 
-详细清单见 `docs/hardware-diagnostics.md`。
+当前已经验证通过的日常运维主线路径是 **Windows 控制机 + WSL2 + usbipd + CardPulse Web**。这条路径的一键恢复脚本、Web 首页、消息中心和恢复状态文件说明统一见 [docs/web-control.md](docs/web-control.md)。
+
+硬件诊断细节见 `docs/hardware-diagnostics.md`。
