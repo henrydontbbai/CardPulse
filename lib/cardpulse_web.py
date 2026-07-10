@@ -502,6 +502,24 @@ class OpsState:
                 self._data["recent_messages"]["last_outbound"] = compact
             self._persist()
 
+    def clear_pending_inbound(self, *, index: str = "", phone: str = "") -> None:
+        index = str(index or "")
+        phone = str(phone or "")
+        with self._lock:
+            pending: list[dict[str, Any]] = []
+            for existing in self._data.get("pending_inbound", []):
+                if not isinstance(existing, dict):
+                    continue
+                existing_index = str(existing.get("index", ""))
+                existing_phone = str(existing.get("phone", ""))
+                same_message = bool(index and existing_index == index)
+                if same_message and phone:
+                    same_message = existing_phone == phone
+                if not same_message:
+                    pending.append(existing)
+            self._data["pending_inbound"] = sort_messages(pending)
+            self._persist()
+
     def note_storage_alert(self, alert: dict[str, str]) -> tuple[str, str] | None:
         level = str(alert.get("level", ""))
         summary = str(alert.get("summary", ""))
@@ -525,6 +543,17 @@ class OpsState:
             }
             self._persist()
 
+    def clear_failure(self, *kinds: str) -> None:
+        allowed = {str(kind) for kind in kinds if kind}
+        with self._lock:
+            current = self._data.get("last_failure")
+            if not isinstance(current, dict):
+                return
+            if allowed and str(current.get("kind", "")) not in allowed:
+                return
+            self._data["last_failure"] = None
+            self._persist()
+
 
 def load_json_file(path: Path | None) -> dict[str, Any]:
     if not path or not path.exists():
@@ -541,17 +570,27 @@ def load_recovery_state(path: Path | None) -> dict[str, Any]:
     if not loaded:
         return {
             "state": "",
+            "step": "",
+            "phase_status": "",
             "summary": "",
+            "operator_hint": "",
             "checked_at": "",
             "port": "",
             "web_url": "",
+            "busid": "",
+            "distro": "",
         }
     return {
         "state": str(loaded.get("state", "")),
+        "step": str(loaded.get("step", "")),
+        "phase_status": str(loaded.get("phase_status", "")),
         "summary": str(loaded.get("summary", "")),
+        "operator_hint": str(loaded.get("operator_hint", "")),
         "checked_at": str(loaded.get("checked_at", "")),
         "port": str(loaded.get("port", "")),
         "web_url": str(loaded.get("web_url", "")),
+        "busid": str(loaded.get("busid", "")),
+        "distro": str(loaded.get("distro", "")),
     }
 
 
@@ -716,14 +755,14 @@ def build_overview_payload(
         recommended_action = "SIM 未 READY，请检查 SIM 卡和模块状态。"
     elif signal["state"] != "ok" or not registration["registered"]:
         recommended_action = "网络未稳定注册，请检查信号、天线或运营商状态。"
+    elif recovery_state and recovery_state != "ok":
+        recommended_action = recovery_summary or "最近恢复状态异常，请重新执行恢复脚本。"
     elif storage_alert.get("level") == "danger":
         recommended_action = str(storage_alert.get("summary") or "短信存储已满，请读取收件箱并删除 1 条旧短信后再接收新短信。")
     elif new_inbound_count > 0:
         recommended_action = f"发现 {new_inbound_count} 条新短信提醒，请先进入消息中心查看。"
     elif storage_alert.get("level") == "warn":
         recommended_action = str(storage_alert.get("summary") or "短信存储接近满仓，建议清理明确无用的旧短信。")
-    elif recovery_state and recovery_state != "ok":
-        recommended_action = recovery_summary or "最近恢复状态异常，请重新执行恢复脚本。"
     elif keepalive_state != "ok":
         recommended_action = keepalive_summary
     elif last_failure and last_failure.get("summary"):
@@ -828,12 +867,17 @@ class CardPulseRunner:
         self.root_dir = Path(root_dir)
         self.timeout = timeout
         self.extra_env = extra_env or {}
+        self._device_lock = threading.Lock()
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.update(self.extra_env)
         env.setdefault("CARDPULSE_LIB_DIR", str(self.root_dir / "lib"))
         return env
+
+    def _run_device_subprocess(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        with self._device_lock:
+            return subprocess.run(command, **kwargs)
 
     def run_cardpulse(self, args: list[str]) -> CommandResult:
         configured_bin = os.environ.get("CARDPULSE_WEB_CARDPULSE_BIN", "").strip()
@@ -842,7 +886,7 @@ class CardPulseRunner:
         else:
             command = ["bash", str(self.root_dir / "bin" / "cardpulse"), *args]
 
-        completed = subprocess.run(
+        completed = self._run_device_subprocess(
             command,
             cwd=str(self.root_dir),
             env=self._env(),
@@ -882,7 +926,7 @@ at_send "$CARDPULSE_WEB_AT_CMD" "$CARDPULSE_WEB_AT_TIMEOUT"
         env["CARDPULSE_WEB_AT_CMD"] = cmd
         env["CARDPULSE_WEB_AT_TIMEOUT"] = str(timeout)
 
-        completed = subprocess.run(
+        completed = self._run_device_subprocess(
             ["bash", "-c", script],
             cwd=str(self.root_dir),
             env=env,
@@ -925,7 +969,7 @@ sms_send_with_retry "$CARDPULSE_WEB_SMS_PHONE" "$CARDPULSE_WEB_SMS_MESSAGE"
         env["CARDPULSE_WEB_SMS_PHONE"] = phone
         env["CARDPULSE_WEB_SMS_MESSAGE"] = message
 
-        completed = subprocess.run(
+        completed = self._run_device_subprocess(
             ["bash", "-c", script],
             cwd=str(self.root_dir),
             env=env,
@@ -1160,6 +1204,8 @@ def make_handler(
                 failures.append("短信存储读取失败")
             if failures:
                 ops_state.note_failure(" / ".join(failures), kind="overview")
+            else:
+                ops_state.clear_failure("overview")
 
             storage_alert = compute_storage_alert(sms_payload)
             storage_notification = ops_state.note_storage_alert(storage_alert)
@@ -1216,6 +1262,8 @@ def make_handler(
                 self.send_json(400, {"ok": False, "message": "SMS delete requires confirmation token DELETE_SMS"})
                 return
             payload = result_payload(runner.run_cardpulse(["--delete-sms", index, "--confirm", "DELETE_SMS"]))
+            if payload["ok"]:
+                ops_state.clear_pending_inbound(index=index)
             self.send_json(200 if payload["ok"] else 500, payload)
 
         def handle_current_messages(self) -> None:
@@ -1227,6 +1275,7 @@ def make_handler(
             if result.ok:
                 stored_messages = [history.add(message) for message in messages]
                 new_messages = ops_state.note_current_messages(stored_messages)
+                ops_state.clear_failure("inbox")
                 if new_messages:
                     notify_new_messages(new_messages)
             else:
@@ -1254,6 +1303,7 @@ def make_handler(
                 message = normalize_sms_message(blocks[0], index=index)
                 stored = history.add(message)
                 ops_state.note_message(stored)
+                ops_state.clear_failure("read", "parse")
                 payload["message"] = stored
             elif result.ok:
                 payload["ok"] = False
@@ -1299,6 +1349,7 @@ def make_handler(
             if result.ok:
                 stored = history.add(outbound)
                 ops_state.note_message(stored)
+                ops_state.clear_failure("send")
                 payload["message"] = stored
                 self.send_json(200, payload)
             else:

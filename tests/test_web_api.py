@@ -2,12 +2,16 @@
 import http.client
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -133,6 +137,18 @@ class FailingSmsStatusRunner(FakeRunner):
         return super().run_cardpulse(args)
 
 
+class RecoveringInfoRunner(FakeRunner):
+    def __init__(self):
+        super().__init__()
+        self.fail_info = True
+
+    def run_cardpulse(self, args):
+        if args == ["--info"] and self.fail_info:
+            self.commands.append(list(args))
+            return cardpulse_web.CommandResult(2, "", "[ERROR] info failed")
+        return super().run_cardpulse(args)
+
+
 class UnparseableReadSmsRunner(FakeRunner):
     def run_cardpulse(self, args):
         if args == ["--read-sms", "9"]:
@@ -183,6 +199,14 @@ class RotatingInboxRunner(FakeRunner):
                 "New message indication: 2,1,0,0,0",
                 "",
             )
+        return super().run_cardpulse(args)
+
+
+class FailingDeleteRunner(RotatingInboxRunner):
+    def run_cardpulse(self, args):
+        if args == ["--delete-sms", "2", "--confirm", "DELETE_SMS"]:
+            self.commands.append(list(args))
+            return cardpulse_web.CommandResult(3, "", "[ERROR] delete failed")
         return super().run_cardpulse(args)
 
 
@@ -304,6 +328,8 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn('data.ok && data.message && typeof data.message === "object"', html)
         self.assertIn("function applyOverview", html)
         self.assertIn("recovery-summary", html)
+        self.assertIn("recovery-step", html)
+        self.assertIn("recovery-hint", html)
         self.assertIn("last-inbound", html)
         self.assertIn("last-outbound", html)
 
@@ -336,12 +362,34 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("overview_status", script)
         self.assertIn("recovery.json", script)
         self.assertIn("recovery.json.tmp", script)
-        self.assertIn("mv $tmp_path $recoveryStatePathQ", script)
+        self.assertIn("base64 -d > $recoveryTempPathQ", script)
+        self.assertIn("mv $recoveryTempPathQ $recoveryStatePathQ", script)
         self.assertIn("if ($LASTEXITCODE -ne 0)", script)
+        self.assertNotIn("??", script)
+        self.assertIn("function Expand-LiteralTemplate", script)
+        self.assertIn("$detectScriptTemplate = @'", script)
+        self.assertNotIn(r"\$(", script)
+        self.assertIn("function Assert-CardPulseWebPort", script)
+        self.assertIn("Get-NetTCPConnection", script)
+        self.assertIn('-Step "web-port"', script)
+        self.assertIn("[string]$Step", script)
+        self.assertIn("[string]$PhaseStatus", script)
+        self.assertIn("[string]$OperatorHint", script)
+        self.assertIn("step = $StepSafe", script)
+        self.assertIn("phase_status = $PhaseStatusSafe", script)
+        self.assertIn("operator_hint = $OperatorHintSafe", script)
+        self.assertIn("busid = $BusIdSafe", script)
+        self.assertIn("distro = $DistroSafe", script)
+        self.assertIn('$TargetBusId = ""', script)
+        self.assertLess(
+            script.index('try {\nSet-RecoveryStage -Step "web-port"'),
+            script.index("$TargetBusId = Resolve-DjiBusId -OverrideBusId $BusId"),
+        )
         self.assertIn("--host $HostBind --port $Port$allowSmsArg", script)
         self.assertIn("SMS test remains disabled", script)
         self.assertIn("~/.cardpulse-dji/config/config.yaml", (ROOT_DIR / "docs" / "web-control.md").read_text(encoding="utf-8"))
         self.assertNotIn("1024", script)
+        self.assertNotIn("/tmp/cardpulse-dji-test", script)
         self.assertIn("if stripped == \"serial:\"", script)
         self.assertIn("line.startswith((\" \", \"\\t\")) and stripped.startswith(\"port:\")", script)
 
@@ -359,6 +407,104 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(data["network"], "5")
         self.assertEqual(data["operator"], "CHINA MOBILE")
         self.assertEqual(data["imei"], "863212060375703")
+
+    def test_ops_state_clears_only_matching_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = cardpulse_web.OpsState(Path(tmpdir) / "web-state.json")
+
+            state.note_failure("overview failed", kind="overview")
+            state.clear_failure("overview")
+            self.assertIsNone(state.snapshot()["last_failure"])
+
+            state.note_failure("send failed", kind="send")
+            state.clear_failure("overview")
+            self.assertEqual(state.snapshot()["last_failure"]["kind"], "send")
+
+    def test_successful_overview_clears_matching_old_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RecoveringInfoRunner()
+            server, _ = self.start_server(
+                runner=runner,
+                ops_state_path=Path(tmpdir) / "web-state.json",
+            )
+
+            first_status, first_data = self.request(server, "GET", "/api/overview")
+            runner.fail_info = False
+            second_status, second_data = self.request(server, "GET", "/api/overview")
+
+            self.assertEqual(first_status, 200)
+            self.assertIn("模组信息", first_data["recommended_action"])
+            self.assertEqual(second_status, 200)
+            self.assertNotIn("模组信息读取失败", second_data["recommended_action"])
+            self.assertIsNone(second_data["last_failure"])
+
+    def test_cardpulse_runner_serializes_device_commands(self):
+        runner = cardpulse_web.CardPulseRunner(root_dir=ROOT_DIR)
+        start = threading.Barrier(3)
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fake_run(*args, **kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with state_lock:
+                active -= 1
+            return subprocess.CompletedProcess(args[0], 0, "", "")
+
+        def invoke(args):
+            start.wait()
+            return runner.run_cardpulse(args)
+
+        with mock.patch.object(cardpulse_web.subprocess, "run", side_effect=fake_run):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(invoke, ["--info"]),
+                    pool.submit(invoke, ["--sms-status"]),
+                ]
+                start.wait()
+                for future in futures:
+                    future.result()
+
+        self.assertEqual(max_active, 1)
+
+    def test_cardpulse_runner_serializes_mixed_device_commands(self):
+        runner = cardpulse_web.CardPulseRunner(root_dir=ROOT_DIR)
+        start = threading.Barrier(3)
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fake_run(*args, **kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with state_lock:
+                active -= 1
+            return subprocess.CompletedProcess(args[0], 0, "", "")
+
+        def invoke_at():
+            start.wait()
+            runner.run_at("AT+CSQ", 5)
+
+        def invoke_send():
+            start.wait()
+            runner.send_message("+15550000000", "lock test")
+
+        with mock.patch.object(cardpulse_web.subprocess, "run", side_effect=fake_run):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(invoke_at)
+                second = pool.submit(invoke_send)
+                start.wait()
+                first.result()
+                second.result()
+
+        self.assertEqual(max_active, 1)
 
     def test_status_endpoint_adds_schedule_summary_fields(self):
         server, runner = self.start_server()
@@ -442,10 +588,15 @@ class WebAPITestCase(unittest.TestCase):
             recovery_state_path = Path(tmpdir) / "recovery.json"
             recovery_state_path.write_text(json.dumps({
                 "state": "ok",
+                "step": "web",
+                "phase_status": "complete",
                 "summary": "WSL 恢复成功",
+                "operator_hint": "",
                 "checked_at": "2026-07-09T12:11:12+00:00",
                 "port": "/dev/ttyUSB3",
                 "web_url": "http://127.0.0.1:8765",
+                "busid": "1-4",
+                "distro": "Ubuntu-24.04",
             }, ensure_ascii=False), encoding="utf-8")
             server, _ = self.start_server(
                 runner=runner,
@@ -465,7 +616,11 @@ class WebAPITestCase(unittest.TestCase):
             self.assertEqual(data["alerts"]["new_inbound"]["count"], 1)
             self.assertEqual(data["alerts"]["storage"]["level"], "ok")
             self.assertEqual(data["recovery"]["state"], "ok")
+            self.assertEqual(data["recovery"]["step"], "web")
+            self.assertEqual(data["recovery"]["phase_status"], "complete")
             self.assertEqual(data["recovery"]["summary"], "WSL 恢复成功")
+            self.assertEqual(data["recovery"]["busid"], "1-4")
+            self.assertEqual(data["recovery"]["distro"], "Ubuntu-24.04")
             self.assertIn("新短信", data["recommended_action"])
 
     def test_reading_pending_message_clears_new_inbound_alert(self):
@@ -498,23 +653,81 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
         self.assertEqual(data["recovery"]["state"], "")
+        self.assertEqual(data["recovery"]["step"], "")
+        self.assertEqual(data["recovery"]["phase_status"], "")
         self.assertEqual(data["recovery"]["summary"], "")
+        self.assertEqual(data["recovery"]["operator_hint"], "")
 
     def test_load_recovery_state_handles_multiline_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "recovery.json"
             path.write_text(json.dumps({
                 "state": "error",
+                "step": "driver",
+                "phase_status": "failed",
                 "summary": "first line\nsecond line",
+                "operator_hint": "Run sudo once in Ubuntu.",
                 "checked_at": "2026-07-09T12:11:12+00:00",
                 "port": "/dev/ttyUSB2",
                 "web_url": "http://127.0.0.1:8765",
+                "busid": "1-4",
+                "distro": "Ubuntu-24.04",
             }, ensure_ascii=False), encoding="utf-8")
 
             data = cardpulse_web.load_recovery_state(path)
 
             self.assertEqual(data["state"], "error")
+            self.assertEqual(data["step"], "driver")
+            self.assertEqual(data["phase_status"], "failed")
             self.assertEqual(data["summary"], "first line\nsecond line")
+            self.assertEqual(data["operator_hint"], "Run sudo once in Ubuntu.")
+            self.assertEqual(data["busid"], "1-4")
+            self.assertEqual(data["distro"], "Ubuntu-24.04")
+
+    def test_load_recovery_state_ignores_broken_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "recovery.json"
+            path.write_text("{not json", encoding="utf-8")
+
+            data = cardpulse_web.load_recovery_state(path)
+
+            self.assertEqual(data["state"], "")
+            self.assertEqual(data["step"], "")
+            self.assertEqual(data["phase_status"], "")
+            self.assertEqual(data["summary"], "")
+            self.assertEqual(data["operator_hint"], "")
+
+    def test_recovery_failure_takes_priority_over_storage_and_messages(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RotatingInboxRunner()
+            recovery_state_path = Path(tmpdir) / "recovery.json"
+            recovery_state_path.write_text(json.dumps({
+                "state": "error",
+                "step": "usbipd",
+                "phase_status": "failed",
+                "summary": "USB attach failed",
+                "operator_hint": "Replug the module.",
+                "checked_at": "2026-07-09T12:11:12+00:00",
+                "port": "",
+                "web_url": "",
+                "busid": "1-4",
+                "distro": "Ubuntu-24.04",
+            }, ensure_ascii=False), encoding="utf-8")
+            server, _ = self.start_server(
+                runner=runner,
+                history_path=Path(tmpdir) / "messages.jsonl",
+                ops_state_path=Path(tmpdir) / "web-state.json",
+                recovery_state_path=recovery_state_path,
+            )
+
+            self.request(server, "GET", "/api/messages/current")
+            self.request(server, "GET", "/api/messages/current")
+            status, data = self.request(server, "GET", "/api/overview")
+
+            self.assertEqual(status, 200)
+            self.assertEqual(data["recovery"]["state"], "error")
+            self.assertEqual(data["recovery"]["step"], "usbipd")
+            self.assertIn("USB attach failed", data["recommended_action"])
 
     def test_storage_alert_notifications_deduplicate_until_level_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -866,6 +1079,63 @@ class WebAPITestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
         self.assertEqual(runner.commands, [["--delete-sms", "1", "--confirm", "DELETE_SMS"]])
+
+    def test_deleting_pending_message_clears_new_inbound_alert(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RotatingInboxRunner()
+            server, _ = self.start_server(
+                runner=runner,
+                history_path=Path(tmpdir) / "messages.jsonl",
+                ops_state_path=Path(tmpdir) / "web-state.json",
+            )
+
+            self.request(server, "GET", "/api/messages/current")
+            self.request(server, "GET", "/api/messages/current")
+            before_status, before_data = self.request(server, "GET", "/api/overview")
+            delete_status, delete_data = self.request(
+                server,
+                "POST",
+                "/api/sms/delete",
+                {"index": "2", "confirm": "DELETE_SMS"},
+            )
+            after_status, after_data = self.request(server, "GET", "/api/overview")
+            history_status, history = self.request(server, "GET", "/api/messages/history")
+
+            self.assertEqual(before_status, 200)
+            self.assertEqual(delete_status, 200)
+            self.assertEqual(after_status, 200)
+            self.assertEqual(history_status, 200)
+            self.assertTrue(delete_data["ok"])
+            self.assertEqual(before_data["alerts"]["new_inbound"]["count"], 1)
+            self.assertEqual(after_data["alerts"]["new_inbound"]["count"], 0)
+            self.assertEqual(len(history["messages"]), 2)
+
+    def test_failed_delete_keeps_pending_new_inbound_alert(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FailingDeleteRunner()
+            server, _ = self.start_server(
+                runner=runner,
+                history_path=Path(tmpdir) / "messages.jsonl",
+                ops_state_path=Path(tmpdir) / "web-state.json",
+            )
+
+            self.request(server, "GET", "/api/messages/current")
+            self.request(server, "GET", "/api/messages/current")
+            before_status, before_data = self.request(server, "GET", "/api/overview")
+            delete_status, delete_data = self.request(
+                server,
+                "POST",
+                "/api/sms/delete",
+                {"index": "2", "confirm": "DELETE_SMS"},
+            )
+            after_status, after_data = self.request(server, "GET", "/api/overview")
+
+            self.assertEqual(before_status, 200)
+            self.assertEqual(delete_status, 500)
+            self.assertEqual(after_status, 200)
+            self.assertFalse(delete_data["ok"])
+            self.assertEqual(before_data["alerts"]["new_inbound"]["count"], 1)
+            self.assertEqual(after_data["alerts"]["new_inbound"]["count"], 1)
 
     def test_manual_at_allows_only_readonly_commands_by_default(self):
         self.assertTrue(cardpulse_web.is_readonly_at_command("AT+CSQ"))

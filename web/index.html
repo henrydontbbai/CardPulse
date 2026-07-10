@@ -379,6 +379,7 @@
             <header><h3>恢复状态</h3><span class="badge" id="recovery-badge">未知</span></header>
             <strong id="recovery-summary">-</strong>
             <p>最近检测：<span id="recovery-checked-at">-</span>；端口：<span id="recovery-port">-</span></p>
+            <p>阶段：<span id="recovery-step">-</span>；提示：<span id="recovery-hint">-</span></p>
           </div>
         </div>
         <div class="panel">
@@ -656,6 +657,11 @@
       setMetric("recovery-summary", recovery.summary || "暂无恢复记录");
       setMetric("recovery-checked-at", recovery.checked_at || "-");
       setMetric("recovery-port", recovery.port || "-");
+      const recoveryStep = recovery.step
+        ? `${recovery.step}${recovery.phase_status ? " / " + recovery.phase_status : ""}`
+        : "-";
+      setMetric("recovery-step", recoveryStep);
+      setMetric("recovery-hint", recovery.operator_hint || "-");
 
       const rawBlocks = [];
       if (data.raw && data.raw.status) rawBlocks.push(`=== 发送状态 ===\n${data.raw.status}`);
