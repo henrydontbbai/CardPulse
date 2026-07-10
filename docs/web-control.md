@@ -43,6 +43,8 @@ Keep this on a trusted local network only. The first version is a local operatio
 - SMS inbox status, listing, single-message read, and guarded single-message delete
 - Guarded test SMS action
 
+When the Overview page or Message Center is visible, the page refreshes the relevant read-only data every 60 seconds. It skips hidden tabs and never overlaps an in-progress refresh. Messages are shown newest first; selecting a message remains highlighted across refreshes.
+
 The read-only AT console accepts only safe query commands such as:
 
 ```text
@@ -77,6 +79,7 @@ Inbox reads do not delete messages and do not persist message bodies to CardPuls
 The current DJI/Baiwang QDC507 module reports SMS receive support through `AT+CSMS?`, `AT+CPMS?`, `AT+CMGF?`, and `AT+CNMI?`. If storage is full, for example `Storage: ME 23/23 FULL`, list the inbox first and delete only a known disposable message by explicit index.
 
 Web delete requires the same `DELETE_SMS` confirmation token and only deletes one index per request.
+The Web UI uses a native confirmation dialog for every real SMS send and delete action. Sending remains disabled unless the server starts with `--allow-sms`; deletion remains a one-message action with `DELETE_SMS`.
 
 Current hardware note: after deleting five known disposable stored messages, the verified DJI/Baiwang test module reports `Storage: ME 18/23`. This leaves five free SMS slots for receive testing. Do not treat this as a general default; always trust the live `cardpulse --sms-status` result.
 

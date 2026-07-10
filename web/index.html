@@ -202,6 +202,11 @@
       background: var(--panel-2);
       border-color: #bdd1c2;
     }
+    .message-item.selected {
+      background: #eaf5ee;
+      border-color: var(--accent);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
     .message-item:active { transform: scale(.96); }
     .message-item strong,
     .message-meta {
@@ -298,6 +303,21 @@
     .badge.ok { color: var(--accent); }
     .badge.warn { color: var(--warn); }
     .badge.danger { color: var(--danger); }
+    dialog {
+      width: min(440px, calc(100vw - 32px));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0;
+      color: var(--text);
+      background: var(--panel);
+      box-shadow: 0 12px 40px rgba(31, 38, 31, .2);
+    }
+    dialog::backdrop { background: rgba(16, 20, 16, .42); }
+    .dialog-content { padding: 20px; }
+    .dialog-content h2 { margin: 0 0 8px; font-size: 20px; }
+    .dialog-content p { margin: 0 0 14px; color: var(--muted); line-height: 1.5; }
+    .dialog-token { width: 100%; margin-bottom: 14px; }
+    .dialog-actions { justify-content: flex-end; }
 
     @media (max-width: 900px) {
       .shell { grid-template-columns: 1fr; }
@@ -497,10 +517,28 @@
     </main>
   </div>
 
+  <dialog id="sms-confirm-dialog">
+    <form method="dialog" class="dialog-content">
+      <h2 id="sms-confirm-title">确认短信操作</h2>
+      <p id="sms-confirm-message"></p>
+      <input class="dialog-token" id="sms-confirm-token" autocomplete="off">
+      <div class="actions dialog-actions">
+        <button class="secondary" value="cancel">取消</button>
+        <button class="danger" id="sms-confirm-submit" value="confirm">确认继续</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
     const $ = (id) => document.getElementById(id);
     const sections = document.querySelectorAll(".section");
     const navButtons = document.querySelectorAll(".nav button");
+    const AUTO_REFRESH_MS = 60000;
+    const confirmDialog = $("sms-confirm-dialog");
+    let overviewRefreshInFlight = false;
+    let inboxRefreshInFlight = false;
+    let historyRefreshInFlight = false;
+    let selectedMessageKey = "";
 
     function setView(id) {
       sections.forEach((section) => section.classList.toggle("active", section.id === id));
@@ -681,6 +719,9 @@
     }
 
     async function refreshOverview() {
+      if (overviewRefreshInFlight) return null;
+      overviewRefreshInFlight = true;
+      try {
       setStatus("overview-status", "正在读取概览状态", true);
       setRaw("overview-output", {output: "正在读取概览状态..."});
       const data = await api("/api/overview", {}, 45000);
@@ -692,6 +733,10 @@
       } else {
         setRaw("overview-output", data);
         setStatus("overview-status", data.message || "概览读取失败，请查看排障详情。", false);
+      }
+      return data;
+      } finally {
+        overviewRefreshInFlight = false;
       }
     }
 
@@ -713,8 +758,12 @@
     });
 
     $("send-test-sms").addEventListener("click", async () => {
-      if (!window.confirm("将使用当前 CardPulse 配置发送一条真实短信，是否继续？")) return;
-      const token = window.prompt("请输入 SEND_SMS 进行二次确认");
+      const token = await requestSmsConfirmation({
+        title: "确认发送测试短信",
+        message: "将使用当前 CardPulse 配置发送一条真实短信。",
+        token: "SEND_SMS"
+      });
+      if (!token) return;
       setStatus("sms-status", "正在发送测试短信", true);
       setRaw("sms-output", {output: "正在执行短信测试命令..."});
       const data = await api("/api/actions/test-sms", {
@@ -730,6 +779,19 @@
 
     let selectedModuleIndex = "";
 
+    function messageKey(message) {
+      return String(message.id || `${message.storage || ""}:${message.index || ""}:${message.time || ""}`);
+    }
+
+    function sortMessagesForDisplay(messages) {
+      return [...messages].sort((left, right) => {
+        const leftTime = String(left.time || "");
+        const rightTime = String(right.time || "");
+        if (leftTime !== rightTime) return rightTime.localeCompare(leftTime);
+        return messageKey(right).localeCompare(messageKey(left));
+      });
+    }
+
     function messageLabel(message) {
       if (message.direction === "outbound") return `发出至 ${message.to || message.phone || "-"}`;
       return `来自 ${message.from || message.phone || "-"}`;
@@ -739,6 +801,8 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = "message-item";
+      button.classList.toggle("selected", messageKey(message) === selectedMessageKey);
+      button.dataset.messageKey = messageKey(message);
 
       const title = document.createElement("strong");
       title.textContent = messageLabel(message);
@@ -763,7 +827,7 @@
         list.innerHTML = '<div class="status-line">当前模块没有短信。</div>';
         return;
       }
-      messages.forEach((message) => {
+      sortMessagesForDisplay(messages).forEach((message) => {
         list.appendChild(renderMessageButton(message, () => readCurrentMessage(message.index)));
       });
     }
@@ -775,12 +839,16 @@
         list.innerHTML = '<div class="status-line">本地历史暂无记录。</div>';
         return;
       }
-      messages.forEach((message) => {
+      sortMessagesForDisplay(messages).forEach((message) => {
         list.appendChild(renderMessageButton(message, showMessageDetail));
       });
     }
 
     function showMessageDetail(message) {
+      selectedMessageKey = messageKey(message);
+      document.querySelectorAll(".message-item").forEach((button) => {
+        button.classList.toggle("selected", button.dataset.messageKey === selectedMessageKey);
+      });
       selectedModuleIndex = message.storage === "module" ? (message.index || "") : "";
       $("delete-sms").disabled = !selectedModuleIndex;
       $("message-detail-status").textContent = `${messageLabel(message)} · ${message.time || "时间未知"}`;
@@ -788,11 +856,17 @@
     }
 
     async function refreshHistory() {
+      if (historyRefreshInFlight) return null;
+      historyRefreshInFlight = true;
+      try {
       const direction = $("history-direction").value;
       const path = direction ? `/api/messages/history?direction=${encodeURIComponent(direction)}` : "/api/messages/history";
       const data = await api(path);
       renderHistoryMessages(data.messages || []);
       return data;
+      } finally {
+        historyRefreshInFlight = false;
+      }
     }
 
     $("refresh-sms-status").addEventListener("click", async () => {
@@ -807,14 +881,23 @@
       await refreshOverview();
     });
 
-    $("refresh-inbox").addEventListener("click", async () => {
+    async function refreshInbox() {
+      if (inboxRefreshInFlight) return null;
+      inboxRefreshInFlight = true;
+      try {
       setStatus("inbox-status", "正在读取当前模块短信", true);
       const data = await api("/api/messages/current", {}, 45000);
       renderCurrentMessages(data.messages || []);
       setStatus("inbox-status", data.ok ? `当前模块已刷新：${(data.messages || []).length} 条` : (data.message || "读取失败"), data.ok);
       await refreshHistory();
       await refreshOverview();
-    });
+      return data;
+      } finally {
+        inboxRefreshInFlight = false;
+      }
+    }
+
+    $("refresh-inbox").addEventListener("click", refreshInbox);
 
     async function readCurrentMessage(index) {
       setStatus("inbox-status", `正在读取短信 ${index}...`, true);
@@ -828,8 +911,12 @@
     $("delete-sms").addEventListener("click", async () => {
       const index = selectedModuleIndex;
       if (!index) return;
-      if (!window.confirm(`只删除索引 ${index} 这一条短信，是否继续？`)) return;
-      const token = window.prompt("请输入 DELETE_SMS 进行二次确认");
+      const token = await requestSmsConfirmation({
+        title: "确认删除单条短信",
+        message: `只删除索引 ${index} 这一条当前模块短信；本地历史不会被删除。`,
+        token: "DELETE_SMS"
+      });
+      if (!token) return;
       setStatus("inbox-status", `正在删除短信 ${index}...`, true);
       const data = await api("/api/sms/delete", {
         method: "POST",
@@ -838,10 +925,11 @@
       setStatus("inbox-status", data.ok ? "短信已删除" : (data.message || "删除失败"), data.ok);
       if (data.ok) {
         selectedModuleIndex = "";
+        selectedMessageKey = "";
         $("delete-sms").disabled = true;
         $("message-detail").textContent = "已从当前模块删除；本地历史仍可追溯。";
         $("message-detail-status").textContent = "删除完成";
-        $("refresh-inbox").click();
+        await refreshInbox();
       }
       await refreshOverview();
     });
@@ -852,8 +940,12 @@
     $("send-message").addEventListener("click", async () => {
       const phone = $("message-phone").value.trim();
       const message = $("message-body").value.trim();
-      if (!window.confirm(`将向 ${phone || "(未填写号码)"} 发送一条真实短信，是否继续？`)) return;
-      const token = window.prompt("请输入 SEND_SMS 进行二次确认");
+      const token = await requestSmsConfirmation({
+        title: "确认发送短信",
+        message: `将向 ${phone || "(未填写号码)"} 发送一条真实短信。`,
+        token: "SEND_SMS"
+      });
+      if (!token) return;
       setStatus("message-send-status", "正在发送短信", true);
       const data = await api("/api/messages/send", {
         method: "POST",
@@ -865,6 +957,34 @@
       await refreshOverview();
     });
 
+    function requestSmsConfirmation({title, message, token}) {
+      $("sms-confirm-title").textContent = title;
+      $("sms-confirm-message").textContent = `${message} 请输入 ${token} 进行二次确认。`;
+      const tokenInput = $("sms-confirm-token");
+      tokenInput.value = "";
+      tokenInput.placeholder = token;
+      return new Promise((resolve) => {
+        const onClose = () => {
+          confirmDialog.removeEventListener("close", onClose);
+          resolve(confirmDialog.returnValue === "confirm" && tokenInput.value.trim() === token ? token : "");
+        };
+        confirmDialog.addEventListener("close", onClose);
+        confirmDialog.showModal();
+        tokenInput.focus();
+      });
+    }
+
+    async function runVisibleAutoRefresh() {
+      if (document.visibilityState !== "visible") return;
+      const activeView = document.querySelector(".section.active");
+      if (!activeView) return;
+      if (activeView.id === "overview") {
+        await refreshOverview();
+      } else if (activeView.id === "inbox") {
+        await refreshInbox();
+      }
+    }
+
     async function boot() {
       const health = await api("/api/health");
       $("sms-gate").textContent = health.sms_enabled ? "已启用" : "短信测试默认关闭";
@@ -875,6 +995,7 @@
       $("send-message").disabled = !health.sms_enabled;
       await refreshOverview();
       await refreshHistory();
+      setInterval(runVisibleAutoRefresh, AUTO_REFRESH_MS);
     }
 
     boot().catch((error) => {

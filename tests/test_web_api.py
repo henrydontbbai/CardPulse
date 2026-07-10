@@ -292,6 +292,16 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("function refreshOverview", html)
         self.assertIn("data.raw || data.connection || data.sms_storage", html)
 
+    def test_web_ui_refreshes_visible_views_without_overlapping_device_work(self):
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("const AUTO_REFRESH_MS = 60000", html)
+        self.assertIn("document.visibilityState !== \"visible\"", html)
+        self.assertIn("setInterval(runVisibleAutoRefresh, AUTO_REFRESH_MS)", html)
+        self.assertIn("let overviewRefreshInFlight = false", html)
+        self.assertIn("let inboxRefreshInFlight = false", html)
+        self.assertIn("async function refreshInbox", html)
+
     def test_web_ui_has_structured_overview_and_sms_controls(self):
         html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
@@ -332,6 +342,25 @@ class WebAPITestCase(unittest.TestCase):
         self.assertIn("recovery-hint", html)
         self.assertIn("last-inbound", html)
         self.assertIn("last-outbound", html)
+
+    def test_web_ui_uses_native_dialogs_for_dangerous_sms_actions(self):
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('<dialog id="sms-confirm-dialog">', html)
+        self.assertIn('id="sms-confirm-token"', html)
+        self.assertIn("function requestSmsConfirmation", html)
+        self.assertIn("confirmDialog.showModal()", html)
+        self.assertIn("requestSmsConfirmation({", html)
+        self.assertNotIn("window.confirm(", html)
+        self.assertNotIn("window.prompt(", html)
+
+    def test_web_ui_keeps_selected_message_highlighted(self):
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn(".message-item.selected", html)
+        self.assertIn("button.classList.toggle(\"selected\"", html)
+        self.assertIn("selectedMessageKey", html)
+        self.assertIn("function sortMessagesForDisplay", html)
 
     def test_windows_recovery_script_verifies_doctor_and_keeps_sms_disabled_by_default(self):
         script = (ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1").read_text(encoding="utf-8")
