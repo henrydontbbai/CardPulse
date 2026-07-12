@@ -17,6 +17,16 @@ Compose environment binds that same digest and FPK version to the QDC507
 read-only acceptance marker. Before enabling the scheduler, perform the
 QDC507 read-only acceptance on `/dev/cardpulse-at`.
 
+## GitHub Container publication
+
+The release workflow publishes the `linux/amd64` image, then logs out of GHCR
+and pulls the digest anonymously before it builds the FPK. A GitHub
+administrator must set the `ghcr.io/henrydontbbai/cardpulse` package visibility
+to **Public** once in its GitHub Package settings before the first release.
+The workflow deliberately does not call the package-visibility API because the
+standard Actions `GITHUB_TOKEN` can publish a package without permission to
+change its visibility. Anonymous-pull verification remains the release gate.
+
 `packaging/fnos/dist/cardpulse-1.1.0.fpk` is a historical artifact, not a
 release candidate. It predates the current gateway, lifecycle, default
 no-device, and digest-pinning contracts, and `scripts/verify-fnos-fpk.py`

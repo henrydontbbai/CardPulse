@@ -1056,22 +1056,19 @@ class FnosFpkContractTest(unittest.TestCase):
         self.assertIn('CARDPULSE_IMAGE="$IMAGE_REPOSITORY@$IMAGE_DIGEST"', workflow)
         self.assertNotIn("imagetools inspect", workflow)
 
-    def test_ci_makes_the_ghcr_package_public_and_repulls_the_published_digest(self):
+    def test_ci_requires_a_preconfigured_public_ghcr_package_and_repulls_the_published_digest(self):
         workflow = (ROOT_DIR / ".github" / "workflows" / "fnos-package.yml").read_text(
             encoding="utf-8"
         )
         dockerfile = (ROOT_DIR / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("org.opencontainers.image.source", dockerfile)
-        self.assertIn("- name: Make GitHub Container package public", workflow)
-        self.assertIn("/user/packages/container/$package_name/visibility", workflow)
-        self.assertIn("visibility=public", workflow)
+        self.assertNotIn("- name: Make GitHub Container package public", workflow)
+        self.assertNotIn("/user/packages/container/", workflow)
+        self.assertNotIn("visibility=public", workflow)
         self.assertIn("- name: Verify anonymous GHCR pull", workflow)
         self.assertIn("docker logout ghcr.io", workflow)
-        self.assertLess(
-            workflow.index("- name: Make GitHub Container package public"),
-            workflow.index("- name: Verify anonymous GHCR pull"),
-        )
+        self.assertIn("set the package visibility to public", workflow)
         self.assertLess(
             workflow.index("- name: Verify anonymous GHCR pull"),
             workflow.index("- name: Run fnOS image smoke test"),
