@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+config_dir="${TRIM_PKGVAR:?TRIM_PKGVAR is required}/config"
+. "$SCRIPT_DIR/config-permissions.sh"
+
+if [ ! -e "$config_dir" ] && [ ! -L "$config_dir" ]; then
+    # Do not create application paths until legacy native scheduling has been
+    # ruled out for an upgrade with no persisted CardPulse configuration.
+    sh "$SCRIPT_DIR/migration-guard.sh"
+    cardpulse_prepare_config_directory
+else
+    cardpulse_prepare_config_directory
+    sh "$SCRIPT_DIR/disarm-scheduler.sh"
+    sh "$SCRIPT_DIR/migration-guard.sh"
+fi
+
+. "$SCRIPT_DIR/cardpulse-device-mode.sh"
+cardpulse_prepare_lifecycle_control_dir
+
+# The replacement container repeats this disarm at startup. This earlier
+# lifecycle step closes the window before its runtime exists.
+exit 0

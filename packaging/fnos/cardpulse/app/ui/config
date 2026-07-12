@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "cardpulse.Application": {
+      "title": "CardPulse",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/cardpulse",
+      "gatewaySocket": "app.sock",
+      "url": "/app/cardpulse",
+      "allUsers": false
+    }
+  }
+}

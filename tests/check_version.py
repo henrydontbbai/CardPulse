@@ -13,7 +13,7 @@ def main() -> int:
     cli = (ROOT / "bin" / "cardpulse").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    match = re.search(r'^VERSION="([^"]+)"$', cli, re.MULTILINE)
+    match = re.search(r'^VERSION="\$\{CARDPULSE_VERSION:-([^}]+)\}"$', cli, re.MULTILINE)
     if not match:
         print("VERSION not found in bin/cardpulse", file=sys.stderr)
         return 1

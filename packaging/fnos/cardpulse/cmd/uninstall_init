@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+data_action="${wizard_cardpulse_private_data:-retain}"
+
+fail() {
+    message=$1
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        printf '%s\n' "$message" > "$TRIM_TEMP_LOGFILE"
+    fi
+    printf '%s\n' "$message" >&2
+    exit 1
+}
+
+case "$data_action" in
+retain)
+    # The default intentionally retains config, history, audit, and acceptance
+    # state in the private package data directory.
+    exit 0
+    ;;
+delete)
+    data_dir="${TRIM_PKGVAR:-}"
+    case "$data_dir" in
+    ""|/|.|..)
+        fail "CardPulse refused to delete an unsafe private data path."
+        ;;
+    esac
+
+    if [ ! -e "$data_dir" ]; then
+        exit 0
+    fi
+    if [ -L "$data_dir" ] || [ ! -d "$data_dir" ]; then
+        fail "CardPulse private data path is not a directory."
+    fi
+
+    # Deletion is available only after the explicit uninstall-wizard choice.
+    find "$data_dir" -mindepth 1 -depth -delete
+    rmdir "$data_dir" 2>/dev/null || true
+    ;;
+*)
+    fail "CardPulse received an invalid private data uninstall choice."
+    ;;
+esac

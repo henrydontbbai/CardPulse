@@ -1,7 +1,7 @@
 param(
     [string]$Distro = "Ubuntu-24.04",
     [string]$BusId = "",
-    [string]$HostBind = "0.0.0.0",
+    [string]$HostBind = "127.0.0.1",
     [int]$Port = 8766,
     [switch]$AllowSms
 )
@@ -263,7 +263,6 @@ $TargetBusId = ""
 
 try {
 Set-RecoveryStage -Step "web-port" -PhaseStatus "checking" -Summary "Checking local Web port" -OperatorHint "Stop the conflicting process or choose another -Port value."
-Invoke-Wsl -Command "pkill -f '[s]cripts/cardpulse-web.py' 2>/dev/null || true"
 Assert-CardPulseWebPort -PortNumber $Port
 
 Write-Host "[1/7] Keeping WSL distro alive: $Distro"
@@ -412,31 +411,22 @@ Start-Sleep -Seconds 2
 Write-Host "[7/7] Verifying Web and modem status"
 Set-RecoveryStage -Step "web" -PhaseStatus "checking" -Summary "Verifying Web and modem status" -PortValue $detectedPort -WebUrl "http://127.0.0.1:$Port" -BusIdValue $TargetBusId
 $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10
-$info = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/info" -TimeoutSec 35
-$overview = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/overview" -TimeoutSec 45
 
 $summary = [ordered]@{
     web_url = "http://127.0.0.1:$Port"
     sms_enabled = $health.sms_enabled
-    overview_status = $overview.overall_status
-    recommended_action = $overview.recommended_action
-    sim = $info.sim
-    signal = $info.signal
-    operator = $info.operator
-    imei = $info.imei
+    auth_required = $health.auth_required
+    doctor = "passed before Web launch"
+    sim = "READY (doctor)"
+    signal = "usable (doctor)"
+    network = "registered (doctor)"
     config = "$configDir/config.yaml"
 }
 
 [pscustomobject]$summary | Format-List
 
-if ($info.sim -ne "READY") {
-    throw "Web /api/info did not report SIM READY."
-}
-if (-not ($info.signal -match "^\d+$") -or [int]$info.signal -eq 99) {
-    throw "Web /api/info did not report usable RSSI."
-}
-if (-not $overview.ok) {
-    throw "Web /api/overview did not report a healthy overview: $($overview.recommended_action)"
+if ($health.status -ne "ok") {
+    throw "Web /api/health did not report status ok."
 }
 
 $webUrl = "http://127.0.0.1:$Port"

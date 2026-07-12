@@ -16,7 +16,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run ShellCheck
-        run: shellcheck bin/cardpulse lib/*.sh scripts/install.sh
+        run: shellcheck bin/cardpulse lib/*.sh scripts/*.sh
 
   smoke-test:
     name: Installed CLI Smoke Test
@@ -53,7 +53,7 @@ jobs:
       - name: Run local tests
         run: bash tests/run.sh
       - name: Run ShellCheck directly
-        run: shellcheck bin/cardpulse lib/*.sh scripts/install.sh
+        run: shellcheck bin/cardpulse lib/*.sh scripts/*.sh
 
   windows-recovery-contract:
     name: Windows Recovery Contract
@@ -72,7 +72,7 @@ jobs:
       - name: Install Ruff
         run: python3 -m pip install --user ruff==0.5.7
       - name: Run Ruff
-        run: ~/.local/bin/ruff check lib/pdu_encoder.py lib/pdu_decoder.py tests/*.py
+        run: ~/.local/bin/ruff check lib/*.py scripts/*.py tests/*.py
 
   pdu-encode-test:
     name: PDU Encoding Test

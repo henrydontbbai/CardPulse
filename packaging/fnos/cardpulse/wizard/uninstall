@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "Private data",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "The default retains CardPulse configuration, history, audit, and QDC507 acceptance records."
+      },
+      {
+        "type": "select",
+        "field": "wizard_cardpulse_private_data",
+        "label": "Private CardPulse data",
+        "initValue": "retain",
+        "options": [
+          {
+            "label": "Retain private data (default)",
+            "value": "retain"
+          },
+          {
+            "label": "Delete private data permanently",
+            "value": "delete"
+          }
+        ]
+      }
+    ]
+  }
+]

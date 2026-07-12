@@ -38,3 +38,7 @@ __pycache__/
 # 二进制文件
 /cardpulse
 *.exe
+
+# Generated manual-upload fnOS packages
+/packaging/fnos/dist/
+/packaging/fnos/cardpulse/*.fpk

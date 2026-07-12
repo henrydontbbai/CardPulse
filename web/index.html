@@ -105,6 +105,22 @@
       color: var(--danger);
     }
     button:disabled { opacity: .55; cursor: not-allowed; }
+    .hidden { display: none !important; }
+    .login-screen {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .login-panel {
+      width: min(420px, 100%);
+      display: grid;
+      gap: 16px;
+    }
+    .login-panel h1 { font-size: 24px; }
+    .login-panel p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .login-panel form { display: grid; gap: 12px; }
+    .login-panel input { width: 100%; }
 
     .grid {
       display: grid;
@@ -208,6 +224,19 @@
       box-shadow: inset 0 0 0 1px var(--accent);
     }
     .message-item:active { transform: scale(.96); }
+    .message-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+    .message-select {
+      width: 18px;
+      height: 18px;
+      margin: 12px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
     .message-item strong,
     .message-meta {
       overflow-wrap: anywhere;
@@ -342,11 +371,30 @@
   </style>
 </head>
 <body>
-  <div class="shell">
+  <section class="login-screen" id="login-screen" aria-labelledby="login-title">
+    <div class="panel login-panel">
+      <div class="brand">
+        <div class="mark">CP</div>
+        <h1 id="login-title">CardPulse</h1>
+      </div>
+      <p id="login-description">登录后才能查看设备状态、短信内容和本地历史，并执行受保护操作。</p>
+      <form id="login-form">
+        <input id="login-password" type="password" autocomplete="current-password" placeholder="Web 密码" required>
+        <button class="primary" id="login-submit" type="submit">登录</button>
+      </form>
+      <div class="status-line" id="login-status" aria-live="polite"></div>
+      <p>临时口令 <code>henry</code> 强度极低；仅可短期使用，请尽快通过 <code>scripts/cardpulse-web-password.py</code> 更换。</p>
+    </div>
+  </section>
+
+  <div class="shell hidden" id="app-shell">
     <aside>
       <div class="brand">
         <div class="mark">CP</div>
         <h1>CardPulse</h1>
+      </div>
+      <div class="actions" style="justify-content:flex-start;margin-bottom:20px;">
+        <button class="secondary" id="logout" type="button">退出登录</button>
       </div>
       <nav class="nav" aria-label="视图">
         <button class="active" data-view="overview">设备概览</button>
@@ -354,6 +402,7 @@
         <button data-view="terminal">只读 AT 控制台</button>
         <button data-view="sms">测试短信</button>
         <button data-view="inbox">消息中心</button>
+        <button data-view="settings">设置</button>
       </nav>
     </aside>
 
@@ -455,6 +504,37 @@
         </div>
       </section>
 
+      <section id="settings" class="section">
+        <div class="topbar">
+          <h2>自动保号</h2>
+          <span class="badge warn" id="scheduler-state">读取中</span>
+        </div>
+        <div class="panel">
+          <div class="form-row">
+            <label for="keepalive-phone">接收号码</label>
+            <input class="command" id="keepalive-phone" placeholder="+8613800138000" autocomplete="tel">
+          </div>
+          <div class="form-row" style="align-items:flex-start;">
+            <label for="keepalive-message">保号内容</label>
+            <textarea id="keepalive-message" placeholder="输入保号短信内容"></textarea>
+          </div>
+          <div class="form-row">
+            <label for="keepalive-interval-days">间隔天数</label>
+            <input class="command" id="keepalive-interval-days" type="number" min="1" step="1" value="179">
+          </div>
+          <div class="actions" style="justify-content:flex-start;margin-top:12px;">
+            <button class="primary" id="save-keepalive-config" type="button">保存配置</button>
+          </div>
+          <div class="status-line" id="keepalive-config-status"></div>
+        </div>
+        <div class="panel">
+          <div class="actions" style="justify-content:flex-start;">
+            <button class="danger" id="toggle-scheduler" type="button">启用自动保号</button>
+          </div>
+          <div class="status-line" id="scheduler-status"></div>
+        </div>
+      </section>
+
       <section id="inbox" class="section">
         <div class="topbar">
           <h2>消息中心</h2>
@@ -465,6 +545,9 @@
             <div class="message-toolbar">
               <button class="secondary" id="refresh-sms-status">刷新存储状态</button>
               <button class="primary" id="refresh-inbox">刷新当前模块</button>
+              <button class="danger" id="delete-selected-sms" disabled>批量删除已选</button>
+              <button class="secondary" id="clear-selected-sms" disabled>取消选择</button>
+              <span class="badge" id="selected-slot-count">已选 0/5 槽位</span>
             </div>
             <div class="status-line" id="inbox-status">
               当前模块列表展示模块里仍存在的短信；读取可能会把未读短信标记为已读。
@@ -477,6 +560,7 @@
             <div class="topbar" style="margin-bottom:12px;">
               <h2 style="font-size:18px;">短信详情</h2>
               <button class="danger" id="delete-sms" disabled>删除当前模块短信</button>
+              <button class="danger" id="force-delete-incomplete-sms" disabled>强制删除残缺拼接短信</button>
             </div>
             <div class="status-line" id="message-detail-status">从左侧选择一条短信查看完整内容。</div>
             <div class="message-detail" id="message-detail">尚未选择短信。</div>
@@ -494,7 +578,9 @@
                 <option value="outbound">发出</option>
               </select>
               <button class="secondary" id="refresh-history">刷新历史</button>
+              <button class="danger" id="clear-local-history">清空本地历史</button>
             </div>
+            <div class="status-line" id="history-status"></div>
             <div class="message-list" id="history-message-list"></div>
           </div>
 
@@ -534,11 +620,19 @@
     const sections = document.querySelectorAll(".section");
     const navButtons = document.querySelectorAll(".nav button");
     const AUTO_REFRESH_MS = 60000;
+    const MAX_BATCH_DELETE_SLOTS = 5;
     const confirmDialog = $("sms-confirm-dialog");
     let overviewRefreshInFlight = false;
     let inboxRefreshInFlight = false;
     let historyRefreshInFlight = false;
     let selectedMessageKey = "";
+    let selectedModuleIndexes = new Set();
+    let selectedIncompleteMultipartIndexes = [];
+    let currentModuleMessages = [];
+    let csrfToken = "";
+    let authRequired = false;
+    let sessionActive = false;
+    let liveRefreshTimer = null;
 
     function setView(id) {
       sections.forEach((section) => section.classList.toggle("active", section.id === id));
@@ -549,17 +643,72 @@
       button.addEventListener("click", () => setView(button.dataset.view));
     });
 
+    function clearSensitiveUi() {
+      csrfToken = "";
+      selectedMessageKey = "";
+      selectedModuleIndexes = new Set();
+      selectedIncompleteMultipartIndexes = [];
+      currentModuleMessages = [];
+      ["current-message-list", "history-message-list"].forEach((id) => {
+        $(id).innerHTML = "";
+      });
+      ["overview-output", "doctor-output", "at-output", "sms-output"].forEach((id) => {
+        setRaw(id, {});
+      });
+      $("message-detail").textContent = "";
+      $("message-detail-status").textContent = "";
+    }
+
+    function showLogin(message = "") {
+      stopLiveRefresh();
+      clearSensitiveUi();
+      $("app-shell").classList.add("hidden");
+      $("login-screen").classList.remove("hidden");
+      $("login-password").value = "";
+      setStatus("login-status", message, !message);
+      window.setTimeout(() => $("login-password").focus(), 0);
+    }
+
+    function activateAuthenticatedUi() {
+      sessionActive = true;
+      $("login-screen").classList.add("hidden");
+      $("app-shell").classList.remove("hidden");
+      scheduleLiveRefresh();
+    }
+
+    function stopLiveRefresh() {
+      sessionActive = false;
+      if (liveRefreshTimer !== null) {
+        window.clearTimeout(liveRefreshTimer);
+        liveRefreshTimer = null;
+      }
+    }
+
+    const CARDPULSE_BASE_PATH = "__CARDPULSE_BASE_PATH__";
+
     async function api(path, options = {}, timeoutMs = 25000) {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      const method = String(options.method || "GET").toUpperCase();
+      const headers = {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      };
+      if (method === "POST" && csrfToken) {
+        headers["X-CardPulse-CSRF"] = csrfToken;
+      }
       try {
-        const response = await fetch(path, {
-          headers: {"Content-Type": "application/json"},
-          signal: controller.signal,
-          ...options
+        const response = await fetch(`${CARDPULSE_BASE_PATH}${path}`, {
+          ...options,
+          headers,
+          credentials: "same-origin",
+          signal: controller.signal
         });
         const data = await response.json();
         data.http_status = response.status;
+        if (response.status === 401 && authRequired) {
+          showLogin(data.message || "登录已失效，请重新登录。");
+        }
         return data;
       } catch (error) {
         if (error.name === "AbortError") {
@@ -673,7 +822,6 @@
       const recentMessages = data.recent_messages || {};
       const alerts = data.alerts || {};
       const recovery = data.recovery || {};
-
       const storage = data.sms_storage || {};
       const storageText = storage.total ? `${storage.name} ${storage.used}/${storage.total}` : "-";
       setMetric("sms-storage", storageText);
@@ -700,7 +848,6 @@
         : "-";
       setMetric("recovery-step", recoveryStep);
       setMetric("recovery-hint", recovery.operator_hint || "-");
-
       const rawBlocks = [];
       if (data.raw && data.raw.status) rawBlocks.push(`=== 发送状态 ===\n${data.raw.status}`);
       if (data.raw && data.raw.info) rawBlocks.push(`=== 模组信息 ===\n${data.raw.info}`);
@@ -738,6 +885,36 @@
       } finally {
         overviewRefreshInFlight = false;
       }
+    }
+
+    async function submitLogin(event) {
+      event.preventDefault();
+      const password = $("login-password").value;
+      if (!password) {
+        setStatus("login-status", "请输入 Web 密码。", false);
+        return;
+      }
+      const session = await api("/api/auth/session");
+      const data = await api("/api/auth/login", {
+        method: "POST",
+        headers: {"X-CardPulse-CSRF": session.login_csrf_token || ""},
+        body: JSON.stringify({password})
+      });
+      if (!data.ok) {
+        setStatus("login-status", data.message || "登录失败。", false);
+        return;
+      }
+      csrfToken = data.csrf_token || "";
+      activateAuthenticatedUi();
+      await loadAuthenticatedData();
+    }
+
+    async function logout() {
+      const data = await api("/api/auth/logout", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      showLogin(data.ok ? "已退出登录。" : (data.message || "会话已结束。"));
     }
 
     $("refresh-overview").addEventListener("click", refreshOverview);
@@ -820,15 +997,89 @@
       return button;
     }
 
+    function moduleIndexesFor(message) {
+      if (!message || message.storage !== "module") return [];
+      return Array.isArray(message.indexes)
+        ? message.indexes.map(String).filter((index) => /^\d+$/.test(index))
+        : (message.index ? [String(message.index)] : []);
+    }
+
+    function syncSelectedModuleActions() {
+      const count = selectedModuleIndexes.size;
+      const atLimit = count === MAX_BATCH_DELETE_SLOTS;
+      const overLimit = count > MAX_BATCH_DELETE_SLOTS;
+      $("selected-slot-count").textContent = overLimit
+        ? `已选 ${count}/${MAX_BATCH_DELETE_SLOTS} 槽位，请取消选择后再删除`
+        : `已选 ${count}/${MAX_BATCH_DELETE_SLOTS} 槽位${atLimit ? "（上限）" : ""}`;
+      $("delete-selected-sms").disabled = count === 0 || overLimit;
+      $("clear-selected-sms").disabled = count === 0;
+    }
+
+    function canSelectModuleMessage(message) {
+      const nextIndexes = new Set(selectedModuleIndexes);
+      moduleIndexesFor(message).forEach((index) => nextIndexes.add(index));
+      return nextIndexes.size <= MAX_BATCH_DELETE_SLOTS;
+    }
+
+    function toggleModuleMessageSelection(message, selected) {
+      const indexes = moduleIndexesFor(message);
+      if (selected && !canSelectModuleMessage(message)) {
+        setStatus(
+          "inbox-status",
+          `批量删除最多选择 ${MAX_BATCH_DELETE_SLOTS} 个物理短信槽位；请先取消已有选择。`,
+          false
+        );
+        return false;
+      }
+      indexes.forEach((index) => {
+        if (selected) selectedModuleIndexes.add(index);
+        else selectedModuleIndexes.delete(index);
+      });
+      syncSelectedModuleActions();
+      return true;
+    }
+
+    function renderCurrentMessage(message) {
+      const row = document.createElement("div");
+      row.className = "message-row";
+      const indexes = moduleIndexesFor(message);
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "message-select";
+      checkbox.setAttribute("aria-label", "选择短信删除");
+      checkbox.checked = indexes.length > 0 && indexes.every((index) => selectedModuleIndexes.has(index));
+      const selectionLimitReached = !checkbox.checked && !canSelectModuleMessage(message);
+      checkbox.disabled = !indexes.length
+        || (message.is_multipart && !message.multipart_complete)
+        || selectionLimitReached;
+      if (selectionLimitReached) {
+        checkbox.title = `批量删除最多选择 ${MAX_BATCH_DELETE_SLOTS} 个物理短信槽位`;
+      }
+      checkbox.addEventListener("change", () => {
+        const selected = checkbox.checked;
+        if (!toggleModuleMessageSelection(message, selected)) checkbox.checked = false;
+        renderCurrentMessages(currentModuleMessages);
+      });
+      const button = renderMessageButton(message, () => showCurrentMessage(message));
+      row.append(checkbox, button);
+      return row;
+    }
+
     function renderCurrentMessages(messages) {
       const list = $("current-message-list");
       list.innerHTML = "";
+      currentModuleMessages = messages;
+      const availableIndexes = new Set(messages.flatMap(moduleIndexesFor));
+      selectedModuleIndexes = new Set(
+        [...selectedModuleIndexes].filter((index) => availableIndexes.has(index))
+      );
+      syncSelectedModuleActions();
       if (!messages.length) {
         list.innerHTML = '<div class="status-line">当前模块没有短信。</div>';
         return;
       }
       sortMessagesForDisplay(messages).forEach((message) => {
-        list.appendChild(renderMessageButton(message, () => readCurrentMessage(message.index)));
+        list.appendChild(renderCurrentMessage(message));
       });
     }
 
@@ -849,10 +1100,33 @@
       document.querySelectorAll(".message-item").forEach((button) => {
         button.classList.toggle("selected", button.dataset.messageKey === selectedMessageKey);
       });
-      selectedModuleIndex = message.storage === "module" ? (message.index || "") : "";
+      const isIncompleteMultipart = message.storage === "module"
+        && message.is_multipart
+        && !message.multipart_complete;
+      selectedModuleIndex = message.storage === "module" && !message.is_multipart ? (message.index || "") : "";
+      selectedIncompleteMultipartIndexes = isIncompleteMultipart ? moduleIndexesFor(message) : [];
       $("delete-sms").disabled = !selectedModuleIndex;
+      $("force-delete-incomplete-sms").disabled = !selectedIncompleteMultipartIndexes.length;
       $("message-detail-status").textContent = `${messageLabel(message)} · ${message.time || "时间未知"}`;
       $("message-detail").textContent = message.body || message.preview || "(无内容)";
+    }
+
+    async function showCurrentMessage(message) {
+      if (message.is_multipart) {
+        showMessageDetail(message);
+        const acknowledgement = await api("/api/messages/current/ack", {
+          method: "POST",
+          body: JSON.stringify({id: message.id, indexes: moduleIndexesFor(message)})
+        });
+        setStatus(
+          "inbox-status",
+          acknowledgement.ok ? "拼接短信已展示并确认查看" : (acknowledgement.message || "确认查看失败"),
+          acknowledgement.ok
+        );
+        await refreshOverview();
+        return;
+      }
+      await readCurrentMessage(message.index);
     }
 
     async function refreshHistory() {
@@ -899,6 +1173,13 @@
 
     $("refresh-inbox").addEventListener("click", refreshInbox);
 
+    $("clear-selected-sms").addEventListener("click", () => {
+      if (!selectedModuleIndexes.size) return;
+      selectedModuleIndexes = new Set();
+      renderCurrentMessages(currentModuleMessages);
+      setStatus("inbox-status", "已取消批量删除选择", true);
+    });
+
     async function readCurrentMessage(index) {
       setStatus("inbox-status", `正在读取短信 ${index}...`, true);
       const data = await api(`/api/messages/current/${encodeURIComponent(index)}`);
@@ -934,8 +1215,95 @@
       await refreshOverview();
     });
 
+    $("force-delete-incomplete-sms").addEventListener("click", async () => {
+      const indexes = [...selectedIncompleteMultipartIndexes].sort((left, right) => Number(left) - Number(right));
+      if (!indexes.length || indexes.length > MAX_BATCH_DELETE_SLOTS) return;
+      const token = await requestSmsConfirmation({
+        title: "强制删除残缺拼接短信",
+        message: `将不可逆删除当前残缺拼接短信遗留的物理槽位（${indexes.join(", ")}）。这可能使完整短信无法恢复；本地历史不会被删除。`,
+        token: "FORCE_DELETE_INCOMPLETE_SMS"
+      });
+      if (!token) return;
+      setStatus("inbox-status", `正在强制删除残缺拼接短信的 ${indexes.length} 个槽位...`, true);
+      const data = await api("/api/sms/delete-incomplete", {
+        method: "POST",
+        body: JSON.stringify({indexes, confirm: token})
+      }, 45000);
+      setStatus("inbox-status", data.ok ? `已删除 ${(data.deleted_indexes || []).length} 个残缺拼接短信槽位` : (data.message || "强制删除失败"), data.ok);
+      if (data.ok) {
+        selectedIncompleteMultipartIndexes = [];
+        selectedModuleIndex = "";
+        selectedMessageKey = "";
+        $("delete-sms").disabled = true;
+        $("force-delete-incomplete-sms").disabled = true;
+        $("message-detail").textContent = "残缺拼接短信遗留槽位已从当前模块删除；本地历史仍可追溯。";
+        $("message-detail-status").textContent = "强制删除完成";
+        await refreshInbox();
+      }
+      await refreshOverview();
+    });
+
+    $("delete-selected-sms").addEventListener("click", async () => {
+      const indexes = [...selectedModuleIndexes].sort((left, right) => Number(left) - Number(right));
+      if (!indexes.length || indexes.length > MAX_BATCH_DELETE_SLOTS) return;
+      const token = await requestSmsConfirmation({
+        title: "确认批量删除短信",
+        message: `将删除 ${indexes.length} 个物理槽位（${indexes.join(", ")}）。拼接短信会按完整组删除；本地历史不会被删除。`,
+        token: "DELETE_SMS_BATCH"
+      });
+      if (!token) return;
+      setStatus("inbox-status", `正在批量删除 ${indexes.length} 个短信槽位...`, true);
+      const data = await api("/api/sms/delete-batch", {
+        method: "POST",
+        body: JSON.stringify({indexes, confirm: token})
+      }, 45000);
+      setStatus("inbox-status", data.ok ? `已删除 ${(data.deleted_indexes || []).length} 个短信槽位` : (data.message || "批量删除失败"), data.ok);
+      if (data.ok) {
+        selectedModuleIndexes = new Set();
+        selectedModuleIndex = "";
+        selectedMessageKey = "";
+        $("delete-sms").disabled = true;
+        $("message-detail").textContent = "已从当前模块删除；本地历史仍可追溯。";
+        $("message-detail-status").textContent = "批量删除完成";
+        await refreshInbox();
+      }
+      await refreshOverview();
+    });
+
     $("refresh-history").addEventListener("click", refreshHistory);
     $("history-direction").addEventListener("change", refreshHistory);
+    $("clear-local-history").addEventListener("click", async () => {
+      const token = await requestSmsConfirmation({
+        title: "确认清空本地历史",
+        message: "将不可逆清除本机保存的历史记录，不会删除模块中的任何短信。",
+        token: "CLEAR_LOCAL_HISTORY"
+      });
+      if (!token) return;
+      $("clear-local-history").disabled = true;
+      try {
+        const data = await api("/api/messages/history/clear", {
+          method: "POST",
+          body: JSON.stringify({confirm: token})
+        });
+        setStatus(
+          "history-status",
+          data.ok ? `已清空 ${data.cleared_count || 0} 条本地历史；模块短信未受影响。` : (data.message || "清空失败"),
+          data.ok
+        );
+        if (data.ok) {
+          renderHistoryMessages([]);
+          selectedMessageKey = "";
+        }
+      } finally {
+        $("clear-local-history").disabled = false;
+      }
+    });
+    $("login-form").addEventListener("submit", (event) => {
+      submitLogin(event).catch((error) => setStatus("login-status", error.message, false));
+    });
+    $("logout").addEventListener("click", () => {
+      logout().catch((error) => showLogin(error.message));
+    });
 
     $("send-message").addEventListener("click", async () => {
       const phone = $("message-phone").value.trim();
@@ -985,7 +1353,20 @@
       }
     }
 
-    async function boot() {
+    function scheduleLiveRefresh() {
+      if (!sessionActive || liveRefreshTimer !== null) return;
+      liveRefreshTimer = window.setTimeout(async () => {
+        liveRefreshTimer = null;
+        if (!sessionActive) return;
+        try {
+          await runVisibleAutoRefresh();
+        } finally {
+          scheduleLiveRefresh();
+        }
+      }, AUTO_REFRESH_MS);
+    }
+
+    async function loadAuthenticatedData() {
       const health = await api("/api/health");
       $("sms-gate").textContent = health.sms_enabled ? "已启用" : "短信测试默认关闭";
       $("sms-gate").classList.toggle("ok", health.sms_enabled);
@@ -995,7 +1376,95 @@
       $("send-message").disabled = !health.sms_enabled;
       await refreshOverview();
       await refreshHistory();
-      setInterval(runVisibleAutoRefresh, AUTO_REFRESH_MS);
+      await refreshKeepaliveConfig();
+      await refreshScheduler();
+    }
+
+    async function refreshKeepaliveConfig() {
+      const data = await api("/api/keepalive-config");
+      if (!data.ok) {
+        setStatus("keepalive-config-status", data.message || "配置读取失败", false);
+        return data;
+      }
+      $("keepalive-phone").value = data.phone || "";
+      $("keepalive-message").value = data.message || "";
+      $("keepalive-interval-days").value = String(data.interval_days || 179);
+      setStatus(
+        "keepalive-config-status",
+        data.ready ? "配置已就绪" : (data.reason || "请完成保号配置"),
+        Boolean(data.ready)
+      );
+      return data;
+    }
+
+    async function refreshScheduler() {
+      const data = await api("/api/scheduler");
+      const enabled = Boolean(data.enabled);
+      const ready = Boolean(data.ready);
+      const accepted = data.accepted !== false;
+      $("scheduler-state").textContent = enabled
+        ? "已启用"
+        : (ready ? "默认关闭" : (accepted ? "需要配置" : "QDC507 验收未完成"));
+      $("scheduler-state").classList.toggle("warn", !enabled || !ready);
+      $("toggle-scheduler").textContent = enabled ? "关闭自动保号" : "启用自动保号";
+      $("toggle-scheduler").dataset.enabled = enabled ? "true" : "false";
+      $("toggle-scheduler").disabled = !enabled && !ready;
+      if (!enabled && !ready) {
+        setStatus("scheduler-status", data.reason || "QDC507 验收未完成", false);
+      }
+    }
+
+    $("save-keepalive-config").addEventListener("click", async () => {
+      const intervalDays = Number($("keepalive-interval-days").value);
+      const data = await api("/api/keepalive-config", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: $("keepalive-phone").value,
+          message: $("keepalive-message").value,
+          interval_days: intervalDays
+        })
+      });
+      setStatus(
+        "keepalive-config-status",
+        data.ok ? "配置已保存" : (data.message || "配置保存失败"),
+        Boolean(data.ok)
+      );
+      if (data.ok) {
+        await refreshKeepaliveConfig();
+        await refreshScheduler();
+      }
+    });
+
+    $("toggle-scheduler").addEventListener("click", async () => {
+      const enabled = $("toggle-scheduler").dataset.enabled !== "true";
+      const token = await requestSmsConfirmation({
+        title: enabled ? "确认启用自动保号" : "确认关闭自动保号",
+        message: enabled
+          ? "QDC507 应已通过只读验收。启用后调度器将在下一个检查周期执行。"
+          : "关闭后不会再自动发起保号检查。",
+        token: "SET_SCHEDULER_ENABLED"
+      });
+      if (!token) return;
+      const data = await api("/api/scheduler", {
+        method: "POST",
+        body: JSON.stringify({enabled, confirm: token})
+      });
+      setStatus("scheduler-status", data.ok ? (data.enabled ? "自动保号已启用" : "自动保号已关闭") : (data.message || "设置失败"), Boolean(data.ok));
+      await refreshScheduler();
+    });
+
+    async function boot() {
+      const session = await api("/api/auth/session");
+      authRequired = Boolean(session.auth_required);
+      if (session.authenticated) {
+        csrfToken = session.csrf_token || "";
+        activateAuthenticatedUi();
+        await loadAuthenticatedData();
+        return;
+      }
+      showLogin(session.configured === false
+        ? "尚未配置 Web 密码。请先在服务主机运行密码设置脚本。"
+        : "");
     }
 
     boot().catch((error) => {

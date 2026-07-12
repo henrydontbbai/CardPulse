@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "QDC507 device access",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "Keep device access disabled until the fixed /dev/cardpulse-at alias and read-only QDC507 acceptance have been completed."
+      },
+      {
+        "type": "select",
+        "field": "wizard_qdc507_device_mode",
+        "label": "QDC507 device mapping",
+        "initValue": "disabled",
+        "options": [
+          {
+            "label": "Disabled (safe default)",
+            "value": "disabled"
+          },
+          {
+            "label": "Enable fixed /dev/cardpulse-at mapping",
+            "value": "enabled"
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -159,10 +159,17 @@ import json
 import os
 
 groups = json.loads(os.environ["GROUPS_JSON"])
-for key in sorted(groups):
+def group_sort_key(item):
+    key, group = item
+    indexes = [int(part["index"]) for part in group["parts"] if str(part.get("index", "")).isdigit()]
+    return (group.get("timestamp", "UNKNOWN"), min(indexes) if indexes else 0, key)
+
+for key, group in sorted(groups.items(), key=group_sort_key):
     group = groups[key]
-    parts = sorted(group["parts"], key=lambda item: item["seq"])
+    parts = sorted(group["parts"], key=lambda item: (item["seq"], int(item["index"])))
     preview = "".join(part["text"] for part in parts)
+    sequences = {part["seq"] for part in parts}
+    complete = len(parts) == group["total"] and sequences == set(range(1, group["total"] + 1))
     print(f"Indexes: {','.join(part['index'] for part in parts)}")
     status = group["status"]
     label = {
@@ -176,6 +183,7 @@ for key in sorted(groups):
     print(f"From: {group['sender']}")
     print(f"Time: {group['timestamp']}")
     print(f"Parts: {len(parts)}/{group['total']}")
+    print(f"Complete: {'yes' if complete else 'no'}")
     print(f"Preview: {preview}")
     print()
 PY
@@ -211,23 +219,70 @@ sms_receive_list() {
                 concat_groups=$(GROUPS_JSON="$concat_groups" ENTRY_JSON="$decoded" ENTRY_INDEX="$index" ENTRY_STATUS="$status" python3 - <<'PY'
 import json
 import os
+from datetime import datetime
 
 groups = json.loads(os.environ["GROUPS_JSON"])
 entry = json.loads(os.environ["ENTRY_JSON"])
-group_key = f"{entry.get('sender','UNKNOWN')}|{entry.get('concat_ref','')}|{entry.get('concat_total','')}"
-group = groups.setdefault(group_key, {
-    "sender": entry.get("sender", "UNKNOWN"),
-    "timestamp": entry.get("timestamp", "UNKNOWN"),
-    "status": os.environ["ENTRY_STATUS"],
-    "total": int(entry.get("concat_total") or 0),
-    "parts": [],
-})
+sender = entry.get("sender", "UNKNOWN")
+concat_ref = str(entry.get("concat_ref", ""))
+total = int(entry.get("concat_total") or 0)
+seq = int(entry.get("concat_seq") or 0)
 current_timestamp = entry.get("timestamp", "UNKNOWN")
-if group["timestamp"] == "UNKNOWN" or (current_timestamp and current_timestamp < group["timestamp"]):
+
+def parse_timestamp(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+def group_distance_seconds(group):
+    current = parse_timestamp(current_timestamp)
+    group_time = parse_timestamp(group.get("timestamp", ""))
+    if current is None or group_time is None:
+        return None
+    return abs((current - group_time).total_seconds())
+
+candidates = []
+for key, candidate in groups.items():
+    if (
+        candidate.get("sender") != sender
+        or candidate.get("concat_ref") != concat_ref
+        or int(candidate.get("total") or 0) != total
+    ):
+        continue
+    if seq in {int(part.get("seq") or 0) for part in candidate.get("parts", [])}:
+        continue
+    distance = group_distance_seconds(candidate)
+    if distance is not None and distance <= 600:
+        candidates.append((distance, key))
+
+if candidates:
+    _, group_key = min(candidates)
+    group = groups[group_key]
+else:
+    base_key = f"{sender}|{concat_ref}|{total}"
+    ordinal = 1
+    group_key = f"{base_key}|{ordinal}"
+    while group_key in groups:
+        ordinal += 1
+        group_key = f"{base_key}|{ordinal}"
+    group = {
+        "sender": sender,
+        "concat_ref": concat_ref,
+        "timestamp": current_timestamp,
+        "status": os.environ["ENTRY_STATUS"],
+        "total": total,
+        "parts": [],
+    }
+    groups[group_key] = group
+
+if group["timestamp"] == "UNKNOWN" or (
+    current_timestamp != "UNKNOWN" and current_timestamp < group["timestamp"]
+):
     group["timestamp"] = current_timestamp
 group["parts"].append({
     "index": os.environ["ENTRY_INDEX"],
-    "seq": int(entry.get("concat_seq") or 0),
+    "seq": seq,
     "text": entry.get("text", ""),
 })
 print(json.dumps(groups, ensure_ascii=False))

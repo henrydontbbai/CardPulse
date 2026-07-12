@@ -1,0 +1,23 @@
+[Unit]
+Description=CardPulse Web control panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cardpulse
+Group=cardpulse
+Environment=CARDPULSE_CONFIG_DIR=/var/lib/cardpulse/config
+Environment=CARDPULSE_STATE_DIR=/var/lib/cardpulse/state
+Environment=CARDPULSE_SERVICE_MODE=nas
+EnvironmentFile=-/etc/cardpulse/web.env
+ExecStart=/usr/bin/python3 /opt/cardpulse/scripts/cardpulse-web.py --host 127.0.0.1 --port 8766 --public-origin ${CARDPULSE_WEB_PUBLIC_ORIGIN}
+WorkingDirectory=/opt/cardpulse
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cardpulse
+
+[Install]
+WantedBy=multi-user.target

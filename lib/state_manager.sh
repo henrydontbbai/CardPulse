@@ -8,7 +8,11 @@ STATE_DIR="${CARDPULSE_STATE_DIR:-${CONFIG_DIR}/state}"
 
 state_init() {
     mkdir -p "$STATE_DIR"
-    chmod 700 "$STATE_DIR" 2>/dev/null || true
+    if [[ "${CARDPULSE_FNOS_RUNTIME:-}" == "1" ]]; then
+        chmod 2770 "$STATE_DIR" 2>/dev/null || true
+    else
+        chmod 700 "$STATE_DIR" 2>/dev/null || true
+    fi
 }
 
 atomic_write() {
@@ -24,16 +28,19 @@ atomic_write() {
 append_history() {
     local line="$1"
     local history_file="${STATE_DIR}/history.log"
+    local history_lock="${STATE_DIR}/history.lock"
 
     if command -v flock >/dev/null 2>&1; then
         (
+            umask 077
             flock -x -w 5 200 || return 1
             echo "$line" >> "$history_file"
-        ) 200>"${STATE_DIR}/history.lock"
+        ) 200>"$history_lock"
     else
         echo "[WARN] flock not found; history append is unlocked for local macOS testing" >&2
-        echo "$line" >> "$history_file"
+        (umask 077; echo "$line" >> "$history_file")
     fi
+    chmod 600 "$history_file" "$history_lock" 2>/dev/null || true
 }
 
 state_record_success() {

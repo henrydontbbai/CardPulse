@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+sh "$SCRIPT_DIR/migration-guard.sh"
+. "$SCRIPT_DIR/config-permissions.sh"
+cardpulse_prepare_config_directory
+
+mkdir -p "${TRIM_PKGVAR}/state" "${TRIM_APPDEST}"
+chmod 2770 "${TRIM_PKGVAR}" "${TRIM_PKGVAR}/state"
+
+. "$SCRIPT_DIR/cardpulse-device-mode.sh"
+cardpulse_prepare_lifecycle_control_dir

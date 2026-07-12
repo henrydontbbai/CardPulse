@@ -162,6 +162,41 @@ if [[ "$notify_validate_output" != *"telegram.bot_token"* || "$notify_validate_o
     fail "config_validate should treat notification boolean True as enabled"
 fi
 
+info_lib_dir=$(mktemp -d)
+for module in config_reader.sh at_modem.sh sms_sender.sh sms_receiver.sh state_manager.sh notifier.sh; do
+    : > "$info_lib_dir/$module"
+done
+cat > "$info_lib_dir/config_reader.sh" <<'SH'
+config_init() { return 0; }
+config_read() {
+    case "$1" in
+        .serial.baudrate) printf '%s\n' '115200' ;;
+        *) printf '%s\n' "${2:-}" ;;
+    esac
+}
+config_validate() { printf '%s\n' 'unexpected send configuration validation' >&2; return 1; }
+SH
+cat > "$info_lib_dir/at_modem.sh" <<'SH'
+at_init() { return 0; }
+at_show_info() { printf '%s\n' 'mock modem info'; }
+at_close() { return 0; }
+SH
+cat > "$info_lib_dir/sms_sender.sh" <<'SH'
+sms_detect_device() { printf '%s\n' '/dev/cardpulse-at'; }
+SH
+cat > "$info_lib_dir/state_manager.sh" <<'SH'
+state_init() { printf '%s\n' 'unexpected state initialization' >&2; return 1; }
+acquire_singleton_lock() { return 0; }
+SH
+info_output=$(CARDPULSE_LIB_DIR="$info_lib_dir" bash bin/cardpulse --info 2>&1) || {
+    echo "$info_output" >&2
+    fail "--info should work before recipient configuration and state initialization"
+}
+if [[ "$info_output" != *"mock modem info"* ]]; then
+    echo "$info_output" >&2
+    fail "--info did not use the configured AT device"
+fi
+
 wwan_root=$(mktemp -d)
 mkdir -p "$wwan_root/dev"
 : > "$wwan_root/dev/cdc-wdm0"
@@ -593,6 +628,105 @@ if [[ "$sms_concat_time_output" != *"Indexes: 3,4"* || "$sms_concat_time_output"
     fail "sms inbox should merge concatenated SMS parts even if modem timestamps differ"
 fi
 
+concat_ref_reuse_pdus=$(
+python3 - <<'PY'
+import math
+
+GSM_7BIT = (
+    "@", "\u00a3", "$", "\u00a5", "\u00e8", "\u00e9", "\u00f9", "\u00ec",
+    "\u00f2", "\u00c7", "\n", "\u00d8", "\u00f8", "\r", "\u00c5", "\u00e5",
+    "\u0394", "_", "\u03a6", "\u0393", "\u039b", "\u03a9", "\u03a0", "\u03a8",
+    "\u03a3", "\u0398", "\u039e", None, "\u00c6", "\u00e6", "\u00df", "\u00c9",
+    " ", "!", '"', "#", "\u00a4", "%", "&", "'",
+    "(", ")", "*", "+", ",", "-", ".", "/",
+    "0", "1", "2", "3", "4", "5", "6", "7",
+    "8", "9", ":", ";", "<", "=", ">", "?",
+    "\u00a1", "A", "B", "C", "D", "E", "F", "G",
+    "H", "I", "J", "K", "L", "M", "N", "O",
+    "P", "Q", "R", "S", "T", "U", "V", "W",
+    "X", "Y", "Z", "\u00c4", "\u00d6", "\u00d1", "\u00dc", "\u00a7",
+    "\u00bf", "a", "b", "c", "d", "e", "f", "g",
+    "h", "i", "j", "k", "l", "m", "n", "o",
+    "p", "q", "r", "s", "t", "u", "v", "w",
+    "x", "y", "z", "\u00e4", "\u00f6", "\u00f1", "\u00fc", "\u00e0",
+)
+CHAR_TO_GSM = {ch: index for index, ch in enumerate(GSM_7BIT) if ch is not None}
+
+def swap_digits(value):
+    if len(value) % 2:
+        value += "F"
+    return "".join(value[index + 1] + value[index] for index in range(0, len(value), 2))
+
+def pack_septets(septets, skip_bits, prefix):
+    output = bytearray(max(len(prefix), math.ceil((skip_bits + len(septets) * 7) / 8)))
+    output[:len(prefix)] = prefix
+    for offset, septet in enumerate(septets):
+        for bit in range(7):
+            if septet & (1 << bit):
+                position = skip_bits + offset * 7 + bit
+                output[position // 8] |= 1 << (position % 8)
+    return bytes(output)
+
+def build_part(text, seq, timestamp):
+    sender = "12345678901"
+    udh = bytes([0x05, 0x00, 0x03, 0x07, 0x02, seq])
+    header_septets = math.ceil(len(udh) * 8 / 7)
+    payload = pack_septets([CHAR_TO_GSM[ch] for ch in text], header_septets * 7, udh)
+    print(
+        "00"
+        "44"
+        f"{len(sender):02X}"
+        "91"
+        f"{swap_digits(sender)}"
+        "00"
+        "00"
+        f"{timestamp}"
+        f"{header_septets + len(text):02X}"
+        f"{payload.hex().upper()}"
+    )
+
+build_part("First ", 1, "62708021436500")
+build_part("message", 2, "62708021437500")
+build_part("Second ", 1, "62708121436500")
+build_part("message", 2, "62708121437500")
+PY
+)
+concat_reuse_pdu_1=$(printf '%s\n' "$concat_ref_reuse_pdus" | sed -n '1p')
+concat_reuse_pdu_2=$(printf '%s\n' "$concat_ref_reuse_pdus" | sed -n '2p')
+concat_reuse_pdu_3=$(printf '%s\n' "$concat_ref_reuse_pdus" | sed -n '3p')
+concat_reuse_pdu_4=$(printf '%s\n' "$concat_ref_reuse_pdus" | sed -n '4p')
+sms_concat_ref_reuse_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CMGF=0") printf '\r\nOK\r\n' ;;
+          "AT+CMGL=4") printf '\r\n+CMGL: 10,0,,32\r\n%s\r\n+CMGL: 11,0,,32\r\n%s\r\n+CMGL: 12,0,,32\r\n%s\r\n+CMGL: 13,0,,32\r\n%s\r\n\r\nOK\r\n' "$concat_reuse_pdu_1" "$concat_reuse_pdu_2" "$concat_reuse_pdu_3" "$concat_reuse_pdu_4" ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_list
+)
+if [[ "$sms_concat_ref_reuse_output" != *"Indexes: 10,11"* || "$sms_concat_ref_reuse_output" != *"Indexes: 12,13"* || "$sms_concat_ref_reuse_output" == *"Parts: 4/2"* ]]; then
+    echo "$sms_concat_ref_reuse_output" >&2
+    fail "sms inbox should split reused concatenation references into timestamp-window groups"
+fi
+
+sms_concat_incomplete_output=$(
+    source lib/sms_receiver.sh
+    at_send() {
+        case "$1" in
+          "AT+CMGF=0") printf '\r\nOK\r\n' ;;
+          "AT+CMGL=4") printf '\r\n+CMGL: 20,0,,32\r\n%s\r\n\r\nOK\r\n' "$concat_reuse_pdu_1" ;;
+          *) printf '\r\nERROR\r\n' ;;
+        esac
+    }
+    sms_receive_list
+)
+if [[ "$sms_concat_incomplete_output" != *"Indexes: 20"* || "$sms_concat_incomplete_output" != *"Parts: 1/2"* || "$sms_concat_incomplete_output" != *"Complete: no"* ]]; then
+    echo "$sms_concat_incomplete_output" >&2
+    fail "sms inbox should expose incomplete concatenated SMS groups"
+fi
+
 delete_missing_confirm_output=$(bash bin/cardpulse --delete-sms 1 2>&1 || true)
 if [[ "$delete_missing_confirm_output" != *"--confirm DELETE_SMS"* ]]; then
     echo "$delete_missing_confirm_output" >&2
@@ -608,6 +742,20 @@ if grep -q 'rm -f "${CARDPULSE_LOCK_FILE}"' bin/cardpulse; then
     fail "CLI must not remove singleton lock file on exit"
 fi
 grep -q 'command -v flock' lib/state_manager.sh || fail "state manager missing flock availability guard"
+
+state_mode_root=$(mktemp -d)
+(
+    umask 022
+    CONFIG_DIR="$state_mode_root/config"
+    source lib/state_manager.sh
+    STATE_DIR="$state_mode_root/state"
+    state_init
+    append_history "$(date +%s)|2026-07-11 00:00:00|success"
+)
+for state_file in "$state_mode_root/state/history.log" "$state_mode_root/state/history.lock"; do
+    [[ "$(stat -c '%a' "$state_file")" == "600" ]] || fail "state file must be created with mode 600: $state_file"
+done
+rm -rf "$state_mode_root"
 
 if grep -R '\(\(errors++\)\)' lib bin scripts >/dev/null; then
     fail "found fragile error counter increment pattern"
@@ -680,6 +828,30 @@ fi
 parsed_info_value=$(printf '\r\nBaiwang\r\n\r\nOK\r\n' | bash -c 'source lib/at_modem.sh; at_first_response_value')
 if [[ "$parsed_info_value" != "Baiwang" ]]; then
     fail "AT modem should ignore leading blank lines when parsing info responses"
+fi
+
+modem_sys_root=$(mktemp -d)
+mkdir -p \
+    "$modem_sys_root/class/tty/ttyUSB-qdc" \
+    "$modem_sys_root/class/tty/ttyUSB-other" \
+    "$modem_sys_root/devices/qdc/interface" \
+    "$modem_sys_root/devices/other/interface"
+printf '2ca3\n' > "$modem_sys_root/devices/qdc/idVendor"
+printf '4006\n' > "$modem_sys_root/devices/qdc/idProduct"
+printf '1234\n' > "$modem_sys_root/devices/other/idVendor"
+printf '5678\n' > "$modem_sys_root/devices/other/idProduct"
+ln -s "$modem_sys_root/devices/qdc/interface" "$modem_sys_root/class/tty/ttyUSB-qdc/device"
+ln -s "$modem_sys_root/devices/other/interface" "$modem_sys_root/class/tty/ttyUSB-other/device"
+modem_filter_output=$(
+    export CARDPULSE_SYS_CLASS_TTY_ROOT="$modem_sys_root/class/tty"
+    source scripts/nas-modem-prepare.sh
+    port_belongs_to_qdc507 /dev/ttyUSB-qdc && echo qdc
+    ! port_belongs_to_qdc507 /dev/ttyUSB-other && echo other
+)
+rm -rf "$modem_sys_root"
+if [[ "$modem_filter_output" != $'qdc\nother' ]]; then
+    echo "$modem_filter_output" >&2
+    fail "NAS modem preparation must only consider QDC507 USB serial ports"
 fi
 
 echo "shell behavior tests ok"

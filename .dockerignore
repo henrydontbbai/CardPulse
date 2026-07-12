@@ -1,7 +1,9 @@
 .git/
 .github/
 docs/
-scripts/
+scripts/*
+!scripts/fnos-entrypoint.sh
+!scripts/fnos-scheduler.sh
 tests/
 *.log
 state/

@@ -9,33 +9,61 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import socketserver
+import stat
 import subprocess
 import threading
+import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
+
+import yaml
+
+from web_auth import Session, SessionStore, verify_password
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_TIMEOUT = 45
+WEB_VERSION = "1.1.0"
+
+
+if hasattr(socketserver, "UnixStreamServer"):
+    class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        """Threaded HTTP server for a locally-mounted fnOS gateway socket."""
+
+        daemon_threads = True
+        is_unix_socket = True
+else:
+    class ThreadingUnixHTTPServer(ThreadingHTTPServer):
+        """Import-safe placeholder for development hosts without Unix sockets."""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("Unix domain sockets are not supported on this host")
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 CONTROL_RE = re.compile(r"[\r\n\x00-\x1f\x7f]")
 MESSAGE_BLOCK_KEYS = {
     "index",
+    "indexes",
     "status",
     "from",
     "to",
     "time",
+    "parts",
     "preview",
     "message",
 }
+MESSAGE_RECORD_START_KEYS = {"index", "indexes"}
+MESSAGE_BODY_KEYS = {"preview", "message"}
 READONLY_AT_COMMANDS = {
     "AT",
     "ATI",
@@ -55,6 +83,25 @@ READONLY_AT_COMMANDS = {
 }
 PHONE_RE = re.compile(r"^\+?[0-9][0-9 -]{4,30}[0-9]$")
 MAX_WEB_SMS_LENGTH = 612
+HISTORY_DEFAULT_LIMIT = 200
+HISTORY_MAX_LIMIT = 500
+HISTORY_RETENTION_DAYS = 90
+MAX_BATCH_DELETE_SLOTS = 5
+QDC507_ACCEPTANCE_DEVICE = "/dev/cardpulse-at"
+QDC507_ACCEPTANCE_COMMANDS = ("--doctor", "--info", "--sms-status", "--status")
+QDC507_ACCEPTANCE_SCHEMA_VERSION = 3
+QDC507_USB_ID = "2ca3:4006"
+QDC507_RUNTIME_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+QDC507_IMAGE_REFERENCE_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$")
+QDC507_RESOLVED_DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9._-]+$")
+QDC507_SYSFS_TTY_ROOT = Path("/sys/class/tty")
+QDC507_SYSFS_DEV_RE = re.compile(r"^([0-9]+):([0-9]+)$")
+QDC507_USB_COMPONENT_RE = re.compile(r"^[0-9a-fA-F]{4}$")
+GATEWAY_CSRF_COOKIE = "cardpulse_gateway_csrf"
+FNOS_GATEWAY_BASE_PATH = "/app/cardpulse"
+HOST_HEADER_RE = re.compile(
+    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?$"
+)
 
 DEFAULT_HTML = """<!doctype html>
 <html lang="en">
@@ -172,30 +219,54 @@ def parse_sms_status_summary(parsed: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def sms_storage_audit_snapshot(summary: dict[str, Any]) -> dict[str, Any]:
+    used = summary.get("storage_used")
+    total = summary.get("storage_total")
+    return {
+        "name": str(summary.get("storage_name", "")),
+        "used": used if isinstance(used, int) else None,
+        "total": total if isinstance(total, int) else None,
+        "remaining": total - used if isinstance(used, int) and isinstance(total, int) else None,
+        "full": summary.get("storage_full") if isinstance(summary.get("storage_full"), bool) else None,
+        "format": str(summary.get("message_format", "")),
+    }
+
+
 def parse_message_blocks(output: str) -> list[dict[str, str]]:
     blocks: list[dict[str, str]] = []
     current: dict[str, str] = {}
     last_key = ""
-    for raw_line in strip_ansi(output).splitlines():
+    clean_output = strip_ansi(output)
+    inbox_mode = "=== SMS inbox ===" in clean_output
+    for raw_line in clean_output.splitlines():
         line = raw_line.rstrip()
-        if not line or line.startswith("==="):
-            if current:
-                blocks.append(current)
-                current = {}
-                last_key = ""
+        if line.startswith("==="):
             continue
-        if last_key == "message" and current:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            normalized = key.strip().lower().replace(" ", "_")
+            if normalized in MESSAGE_RECORD_START_KEYS and (inbox_mode or not current):
+                if current:
+                    blocks.append(current)
+                current = {normalized: value.strip()}
+                last_key = normalized
+                continue
+        if not current:
+            continue
+        if last_key in MESSAGE_BODY_KEYS:
+            if inbox_mode and ":" in line:
+                key, value = line.split(":", 1)
+                normalized = key.strip().lower().replace(" ", "_")
+                if normalized in {"status", "from", "time", "parts"}:
+                    current[normalized] = value.strip()
+                    last_key = normalized
+                    continue
             current[last_key] = current[last_key] + "\n" + line.strip()
             continue
         if ":" not in line:
-            if current and last_key == "preview":
-                current[last_key] = current[last_key] + "\n" + line.strip()
             continue
         key, value = line.split(":", 1)
         normalized = key.strip().lower().replace(" ", "_")
-        if current and last_key == "preview" and normalized not in MESSAGE_BLOCK_KEYS:
-            current[last_key] = current[last_key] + "\n" + line.strip()
-            continue
         if normalized:
             current[normalized] = value.strip()
             last_key = normalized
@@ -217,6 +288,492 @@ def utc_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def fnos_config_directory() -> Optional[Path]:
+    config_dir = os.environ.get("CARDPULSE_CONFIG_DIR")
+    if os.environ.get("CARDPULSE_FNOS_RUNTIME") == "1" and config_dir:
+        return Path(config_dir)
+    return None
+
+
+def fnos_data_directory() -> Optional[Path]:
+    data_dir = os.environ.get("CARDPULSE_DATA_DIR")
+    if os.environ.get("CARDPULSE_FNOS_RUNTIME") == "1" and data_dir:
+        return Path(data_dir)
+    return None
+
+
+def paths_match(path: Path, expected: Path) -> bool:
+    return os.path.abspath(path) == os.path.abspath(expected)
+
+
+def is_fnos_shared_config(path: Path) -> bool:
+    config_dir = fnos_config_directory()
+    return config_dir is not None and paths_match(Path(path), config_dir / "config.yaml")
+
+
+def private_directory_mode(path: Path) -> int:
+    config_dir = fnos_config_directory()
+    if config_dir is not None:
+        if paths_match(Path(path), config_dir):
+            return 0o2750
+        return 0o2770
+    return 0o700
+
+
+def private_file_mode(path: Path) -> int:
+    """Keep fnOS config writable by its lifecycle account and runtime group."""
+    if is_fnos_shared_config(path):
+        return 0o660
+    return 0o600
+
+
+def harden_mode(path: Path, mode: int, *, strict: bool = False) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        if not strict:
+            return
+        try:
+            current_mode = path.stat().st_mode & 0o7777
+        except OSError:
+            raise exc
+        if current_mode != mode:
+            raise PermissionError(f"cannot secure {path}") from exc
+        return
+    if strict and os.name != "nt" and path.stat().st_mode & 0o7777 != mode:
+        raise PermissionError(f"cannot secure {path}")
+
+
+def ensure_private_directory(path: Path, *, strict: bool = False) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    harden_mode(path, private_directory_mode(path), strict=strict)
+
+
+def ensure_gateway_socket_directory(path: Path, *, strict: bool = False) -> None:
+    """Keep the fnOS gateway socket reachable only by the package group."""
+    path.mkdir(parents=True, exist_ok=True)
+    harden_mode(path, 0o3770, strict=strict)
+
+
+def ensure_private_file(path: Path, *, strict: bool = False) -> None:
+    if path.exists():
+        harden_mode(path, private_file_mode(path), strict=strict)
+
+
+def append_private_text(path: Path, content: str) -> None:
+    path = Path(path)
+    ensure_private_directory(path.parent)
+    mode = private_file_mode(path)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode)
+    try:
+        try:
+            os.fchmod(descriptor, mode)
+        except (AttributeError, OSError):
+            pass
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(content)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    ensure_private_file(path)
+
+
+def atomic_write_private_text(path: Path, content: str) -> None:
+    path = Path(path)
+    ensure_private_directory(path.parent)
+    mode = private_file_mode(path)
+    if is_fnos_shared_config(path):
+        if path.is_symlink():
+            raise PermissionError(f"refusing to follow shared configuration symlink: {path}")
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC | no_follow)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = -1
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        ensure_private_file(path)
+        return
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        try:
+            os.fchmod(descriptor, mode)
+        except (AttributeError, OSError):
+            pass
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+        ensure_private_file(path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def scheduler_enabled_from_config(path: Path) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    in_scheduler = False
+    for line in lines:
+        if re.match(r"^scheduler:\s*$", line):
+            in_scheduler = True
+            continue
+        if in_scheduler and line and not line.startswith((" ", "\t", "#")):
+            break
+        if in_scheduler:
+            match = re.match(r"^\s+enabled:\s*(true|false)\s*$", line, re.IGNORECASE)
+            if match:
+                return match.group(1).lower() == "true"
+    return False
+
+
+def set_scheduler_enabled(path: Path, enabled: bool) -> None:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        content = ""
+    block = f"scheduler:\n  enabled: {'true' if enabled else 'false'}\n"
+    pattern = re.compile(r"(?m)^scheduler:\n(?:^[ \t]+.*(?:\n|$))*")
+    if pattern.search(content):
+        content = pattern.sub(block, content, count=1)
+    else:
+        content = content.rstrip() + "\n\n" + block
+    atomic_write_private_text(path, content)
+
+
+def load_cardpulse_config(path: Path) -> dict[str, Any]:
+    try:
+        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError("CardPulse configuration cannot be read") from exc
+    if not isinstance(config, dict):
+        raise ValueError("CardPulse configuration must be a YAML mapping")
+    return config
+
+
+def keepalive_config_error(path: Path) -> str:
+    try:
+        config = load_cardpulse_config(path)
+    except ValueError as exc:
+        return str(exc)
+
+    serial = config.get("serial")
+    sms = config.get("sms")
+    if not isinstance(serial, dict) or serial.get("port") != "/dev/cardpulse-at":
+        return "fnOS requires the validated /dev/cardpulse-at device path"
+    if serial.get("auto_detect") is not False:
+        return "fnOS automatic serial detection must remain disabled"
+    if not isinstance(sms, dict):
+        return "SMS recipient and message must be configured before enabling the scheduler"
+
+    phone = sms.get("phone")
+    message = sms.get("message")
+    if not isinstance(phone, str) or not phone.strip():
+        return "SMS recipient must be configured before enabling the scheduler"
+    if not isinstance(message, str) or not message.strip():
+        return "SMS message must be configured before enabling the scheduler"
+    validation_error = validate_web_sms(phone.strip(), message.strip())
+    if validation_error:
+        return validation_error
+
+    interval_days = sms.get("interval_days")
+    if isinstance(interval_days, bool) or not isinstance(interval_days, int) or interval_days < 1:
+        return "keepalive interval must be a positive integer"
+    return ""
+
+
+def get_keepalive_config(path: Path) -> dict[str, Any]:
+    config = load_cardpulse_config(path)
+    sms = config.get("sms") if isinstance(config.get("sms"), dict) else {}
+    interval_days = sms.get("interval_days", 179)
+    if isinstance(interval_days, bool) or not isinstance(interval_days, int):
+        interval_days = 179
+    reason = keepalive_config_error(path)
+    return {
+        "phone": str(sms.get("phone", "")),
+        "message": str(sms.get("message", "")),
+        "interval_days": interval_days,
+        "ready": not bool(reason),
+        "reason": reason,
+    }
+
+
+def set_keepalive_config(path: Path, phone: str, message: str, interval_days: int) -> dict[str, Any]:
+    if isinstance(interval_days, bool) or not isinstance(interval_days, int) or interval_days < 1:
+        raise ValueError("keepalive interval must be a positive integer")
+    phone = phone.strip()
+    message = message.strip()
+    validation_error = validate_web_sms(phone, message)
+    if validation_error:
+        raise ValueError(validation_error)
+
+    config = load_cardpulse_config(path)
+    sms = config.setdefault("sms", {})
+    if not isinstance(sms, dict):
+        raise ValueError("CardPulse SMS configuration must be a mapping")
+    sms["phone"] = phone
+    sms["message"] = message
+    sms["interval_days"] = interval_days
+    atomic_write_private_text(path, yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
+    return get_keepalive_config(path)
+
+
+def qdc507_fnos_lifecycle_record_status(path: Path) -> tuple[bool, str]:
+    """Require an fnOS acceptance record that the runtime cannot replace."""
+    if os.environ.get("CARDPULSE_FNOS_RUNTIME") != "1":
+        return True, ""
+
+    data_dir = fnos_data_directory()
+    if data_dir is None:
+        return False, "QDC507 lifecycle acceptance data directory is unavailable"
+    lifecycle_dir = data_dir / "lifecycle"
+    expected_path = lifecycle_dir / "qdc507-readonly-acceptance.json"
+    if not paths_match(path, expected_path):
+        return False, "QDC507 lifecycle acceptance record location is invalid"
+
+    try:
+        data_stat = data_dir.lstat()
+        lifecycle_stat = lifecycle_dir.lstat()
+        marker_stat = path.lstat()
+        runtime_uid = os.getuid()
+    except (AttributeError, OSError):
+        return False, "QDC507 lifecycle acceptance record cannot be inspected"
+
+    if (
+        not stat.S_ISDIR(data_stat.st_mode)
+        or (data_stat.st_mode & 0o7777) != 0o3770
+        or not stat.S_ISDIR(lifecycle_stat.st_mode)
+        or lifecycle_stat.st_uid != data_stat.st_uid
+        or lifecycle_stat.st_gid != data_stat.st_gid
+        or lifecycle_stat.st_uid == runtime_uid
+        or (lifecycle_stat.st_mode & 0o7777) != 0o2750
+    ):
+        return False, "QDC507 lifecycle acceptance directory is invalid"
+    if (
+        not stat.S_ISREG(marker_stat.st_mode)
+        or marker_stat.st_uid != lifecycle_stat.st_uid
+        or marker_stat.st_gid != lifecycle_stat.st_gid
+        or marker_stat.st_uid == runtime_uid
+        or (marker_stat.st_mode & 0o777) != 0o640
+    ):
+        return False, "QDC507 lifecycle acceptance record permissions are invalid"
+    return True, ""
+
+
+def qdc507_readonly_acceptance_status(path: Optional[Path]) -> tuple[bool, str]:
+    """Return whether the fnOS QDC507 read-only acceptance record is trustworthy."""
+    if path is None:
+        return True, ""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, "QDC507 read-only acceptance has not been completed"
+    except (OSError, json.JSONDecodeError):
+        return False, "QDC507 read-only acceptance record cannot be read"
+
+    lifecycle_record_ok, lifecycle_record_reason = qdc507_fnos_lifecycle_record_status(path)
+    if not lifecycle_record_ok:
+        return False, lifecycle_record_reason
+
+    if os.name != "nt":
+        try:
+            marker_mode = path.stat().st_mode & 0o777
+        except OSError:
+            return False, "QDC507 read-only acceptance record cannot be read"
+        expected_marker_mode = 0o640 if fnos_data_directory() is not None else 0o600
+        if marker_mode != expected_marker_mode:
+            return False, "QDC507 read-only acceptance record permissions are invalid"
+
+    if not isinstance(record, dict):
+        return False, "QDC507 read-only acceptance record is invalid"
+    if (
+        record.get("schema_version") != QDC507_ACCEPTANCE_SCHEMA_VERSION
+        or isinstance(record.get("schema_version"), bool)
+    ):
+        return False, "QDC507 read-only acceptance schema is invalid"
+    if record.get("device") != QDC507_ACCEPTANCE_DEVICE:
+        return False, "QDC507 read-only acceptance used an unexpected device"
+    resolved_device = record.get("resolved_device")
+    if not isinstance(resolved_device, str) or not QDC507_RESOLVED_DEVICE_RE.fullmatch(resolved_device):
+        return False, "QDC507 read-only acceptance resolved device is invalid"
+    if record.get("usb_id") != QDC507_USB_ID:
+        return False, "QDC507 read-only acceptance USB identity is invalid"
+    runtime_version = record.get("runtime_version")
+    if not isinstance(runtime_version, str) or not QDC507_RUNTIME_VERSION_RE.fullmatch(runtime_version):
+        return False, "QDC507 read-only acceptance runtime version is invalid"
+    image_reference = record.get("image_reference")
+    if not isinstance(image_reference, str) or not QDC507_IMAGE_REFERENCE_RE.fullmatch(image_reference):
+        return False, "QDC507 read-only acceptance image reference is invalid"
+    package_version = record.get("package_version")
+    if not isinstance(package_version, str) or not QDC507_RUNTIME_VERSION_RE.fullmatch(package_version):
+        return False, "QDC507 read-only acceptance package version is invalid"
+    if record.get("commands") != list(QDC507_ACCEPTANCE_COMMANDS):
+        return False, "QDC507 read-only acceptance command set is invalid"
+    if record.get("nonroot") is not True or record.get("socket_backend") is not True:
+        return False, "QDC507 read-only acceptance did not verify required permissions"
+    if record.get("device_mode") != "enabled":
+        return False, "QDC507 read-only acceptance did not use enabled device mode"
+
+    current_device_ok, current_device_reason = qdc507_current_device_identity(resolved_device)
+    if not current_device_ok:
+        return False, current_device_reason
+
+    if os.environ.get("CARDPULSE_FNOS_RUNTIME") == "1":
+        # The image digest fixes this environment value. A runtime-writable
+        # state file must never be allowed to extend a hardware acceptance.
+        current_runtime_version = os.environ.get("CARDPULSE_RUNTIME_VERSION", "").strip()
+        if not QDC507_RUNTIME_VERSION_RE.fullmatch(current_runtime_version):
+            return False, "QDC507 read-only acceptance runtime version is invalid"
+        current_runtime_image = os.environ.get("CARDPULSE_RUNTIME_IMAGE", "").strip()
+        if not QDC507_IMAGE_REFERENCE_RE.fullmatch(current_runtime_image):
+            return False, "QDC507 read-only acceptance runtime image is invalid"
+        current_package_version = os.environ.get("CARDPULSE_FPK_VERSION", "").strip()
+        if not QDC507_RUNTIME_VERSION_RE.fullmatch(current_package_version):
+            return False, "QDC507 read-only acceptance package version is invalid"
+    else:
+        try:
+            current_runtime_version = path.with_name("runtime-version").read_text(encoding="utf-8").strip()
+        except OSError:
+            return False, "QDC507 read-only acceptance runtime version cannot be read"
+    if current_runtime_version != runtime_version:
+        return False, "QDC507 read-only acceptance runtime version has changed"
+    if os.environ.get("CARDPULSE_FNOS_RUNTIME") == "1":
+        if current_runtime_image != image_reference:
+            return False, "QDC507 read-only acceptance runtime image has changed"
+        if current_package_version != package_version:
+            return False, "QDC507 read-only acceptance package version has changed"
+
+    active_device_mode_path = qdc507_active_device_mode_path(path)
+    try:
+        active_device_mode_stat = active_device_mode_path.lstat()
+        if not stat.S_ISREG(active_device_mode_stat.st_mode):
+            return False, "QDC507 read-only acceptance device mode is invalid"
+        active_device_mode = active_device_mode_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False, "QDC507 read-only acceptance device mode cannot be read"
+    if active_device_mode != "enabled":
+        return False, "QDC507 read-only acceptance device mode is no longer enabled"
+
+    completed_at = parse_utc_timestamp(record.get("completed_at"))
+    if completed_at is None:
+        return False, "QDC507 read-only acceptance timestamp is invalid"
+    if completed_at > datetime.now(timezone.utc) + timedelta(minutes=5):
+        return False, "QDC507 read-only acceptance timestamp is in the future"
+    return True, ""
+
+
+def qdc507_active_device_mode_path(acceptance_path: Path) -> Path:
+    """Use the lifecycle-owned mode state when fnOS provides its fixed path."""
+    configured_path = os.environ.get("CARDPULSE_QDC507_DEVICE_MODE_PATH", "").strip()
+    if configured_path:
+        return Path(configured_path)
+    return acceptance_path.with_name("qdc507-device-mode.active")
+
+
+def qdc507_current_device_identity(resolved_device: str) -> tuple[bool, str]:
+    """Fail closed unless the current fixed alias still identifies the accepted QDC507."""
+    try:
+        alias_stat = os.stat(QDC507_ACCEPTANCE_DEVICE)
+    except OSError:
+        return False, "QDC507 current device alias cannot be read"
+    if not stat.S_ISCHR(alias_stat.st_mode):
+        return False, "QDC507 current device alias is not a character device"
+    if not hasattr(os, "major") or not hasattr(os, "minor"):
+        return False, "QDC507 current device identity is unavailable on this host"
+
+    try:
+        device_major = os.major(alias_stat.st_rdev)
+        device_minor = os.minor(alias_stat.st_rdev)
+    except (AttributeError, OSError, ValueError):
+        return False, "QDC507 current device alias has invalid device numbers"
+
+    try:
+        tty_nodes = list(QDC507_SYSFS_TTY_ROOT.iterdir())
+    except OSError:
+        return False, "QDC507 current device sysfs cannot be read"
+
+    matching_ttys: list[Path] = []
+    for tty_node in tty_nodes:
+        try:
+            dev_value = (tty_node / "dev").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        dev_match = QDC507_SYSFS_DEV_RE.fullmatch(dev_value)
+        if not dev_match:
+            continue
+        if (int(dev_match.group(1)), int(dev_match.group(2))) == (device_major, device_minor):
+            matching_ttys.append(tty_node)
+
+    if not matching_ttys:
+        return False, "QDC507 current device alias is absent from tty sysfs"
+    if len(matching_ttys) != 1:
+        return False, "QDC507 current device alias matches multiple tty sysfs nodes"
+
+    tty_node = matching_ttys[0]
+    if f"/dev/{tty_node.name}" != resolved_device:
+        return False, "QDC507 current device resolved device does not match acceptance"
+
+    try:
+        current_node = tty_node.resolve(strict=True)
+    except OSError:
+        return False, "QDC507 current device sysfs node cannot be resolved"
+    while True:
+        vendor_path = current_node / "idVendor"
+        product_path = current_node / "idProduct"
+        try:
+            vendor = vendor_path.read_text(encoding="utf-8").strip().lower()
+        except FileNotFoundError:
+            vendor = ""
+        except OSError:
+            return False, "QDC507 current device USB identity cannot be read"
+        try:
+            product = product_path.read_text(encoding="utf-8").strip().lower()
+        except FileNotFoundError:
+            product = ""
+        except OSError:
+            return False, "QDC507 current device USB identity cannot be read"
+
+        if vendor or product:
+            if not QDC507_USB_COMPONENT_RE.fullmatch(vendor) or not QDC507_USB_COMPONENT_RE.fullmatch(product):
+                return False, "QDC507 current device USB identity is invalid"
+            if f"{vendor}:{product}" != QDC507_USB_ID:
+                return False, "QDC507 current device USB identity does not match QDC507"
+            return True, ""
+
+        parent_node = current_node.parent
+        if parent_node == current_node:
+            break
+        current_node = parent_node
+
+    return False, "QDC507 current device USB identity is unavailable"
+
+
+def parse_utc_timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def unique_message_id(direction: str, phone: str, timestamp: str, body: str, index: str = "") -> str:
     return message_id(direction, phone, timestamp, body, index or uuid.uuid4().hex)
 
@@ -235,15 +792,49 @@ def validate_web_sms(phone: str, message_text: str) -> str:
     return ""
 
 
+def parse_sms_indexes(entry: dict[str, str]) -> list[str]:
+    if "indexes" in entry:
+        values = entry.get("indexes", "").split(",")
+    else:
+        values = [entry.get("index", "")]
+    indexes = [value.strip() for value in values if value.strip()]
+    if not indexes or any(not is_sms_index(index) for index in indexes):
+        return []
+    if len(set(indexes)) != len(indexes):
+        return []
+    return indexes
+
+
+def parse_multipart_parts(value: str) -> tuple[int | None, int | None]:
+    match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", value or "")
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
 def normalize_inbox_entry(entry: dict[str, str]) -> dict[str, Any]:
-    index = entry.get("index", "")
+    indexes = parse_sms_indexes(entry)
+    is_multipart = "indexes" in entry or len(indexes) > 1
+    parts_received, parts_total = parse_multipart_parts(entry.get("parts", ""))
+    multipart_complete = not is_multipart or (
+        parts_received == parts_total == len(indexes) and parts_total is not None
+    )
+    reported_complete = parse_bool(entry.get("complete", ""))
+    if is_multipart and reported_complete is not None:
+        multipart_complete = multipart_complete and reported_complete
+    index = indexes[0] if len(indexes) == 1 and not is_multipart else ""
     sender = entry.get("from", "")
     timestamp = entry.get("time", "")
-    preview = entry.get("preview", "")
+    preview = entry.get("preview", "").strip()
     status = entry.get("status", "")
+    slot_identity = ",".join(indexes)
     return {
-        "id": module_message_id("inbound", sender, timestamp, index),
+        "id": module_message_id("inbound", sender, timestamp, slot_identity),
         "index": index,
+        "indexes": indexes,
+        "is_multipart": is_multipart,
+        "multipart_complete": multipart_complete,
+        "physical_slot_count": len(indexes),
         "direction": "inbound",
         "from": sender,
         "to": "",
@@ -265,6 +856,10 @@ def normalize_sms_message(entry: dict[str, str], *, index: str) -> dict[str, Any
     return {
         "id": module_message_id("inbound", sender, timestamp, index),
         "index": index,
+        "indexes": [index],
+        "is_multipart": False,
+        "multipart_complete": True,
+        "physical_slot_count": 1,
         "direction": "inbound",
         "from": sender,
         "to": "",
@@ -279,41 +874,62 @@ def normalize_sms_message(entry: dict[str, str], *, index: str) -> dict[str, Any
 
 
 class MessageHistory:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        now: Any = lambda: datetime.now(timezone.utc),
+    ) -> None:
         self.path = Path(path) if path else None
         self._messages: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._now = now
         self._load()
+
+    def _is_retained(self, message: dict[str, Any]) -> bool:
+        first_seen_at = parse_utc_timestamp(message.get("first_seen_at"))
+        if not first_seen_at:
+            return False
+        age = self._now().astimezone(timezone.utc) - first_seen_at
+        return timedelta(0) <= age < timedelta(days=HISTORY_RETENTION_DAYS)
 
     def _load(self) -> None:
         if not self.path or not self.path.exists():
             return
-        for raw_line in self.path.read_text(encoding="utf-8").splitlines():
+        changed = False
+        try:
+            raw_lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        for raw_line in raw_lines:
             if not raw_line.strip():
                 continue
             try:
                 data = json.loads(raw_line)
             except json.JSONDecodeError:
+                changed = True
                 continue
-            if isinstance(data, dict) and data.get("id"):
-                self._messages[str(data["id"])] = data
+            if not isinstance(data, dict) or not data.get("id") or not self._is_retained(data):
+                changed = True
+                continue
+            self._messages[str(data["id"])] = data
+        ensure_private_directory(self.path.parent)
+        ensure_private_file(self.path)
+        if changed:
+            self._rewrite()
 
     def _persist(self, message: dict[str, Any]) -> None:
         if not self.path:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(message, ensure_ascii=False, sort_keys=True) + "\n")
+        append_private_text(self.path, json.dumps(message, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _rewrite(self) -> None:
         if not self.path:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            for message in self._messages.values():
-                handle.write(json.dumps(message, ensure_ascii=False, sort_keys=True) + "\n")
-        tmp_path.replace(self.path)
+        atomic_write_private_text(
+            self.path,
+            "".join(json.dumps(message, ensure_ascii=False, sort_keys=True) + "\n" for message in self._messages.values()),
+        )
 
     def add(self, message: dict[str, Any]) -> dict[str, Any]:
         stored = dict(message)
@@ -327,11 +943,13 @@ class MessageHistory:
                 str(stored.get("index", "")),
             ),
         )
+        stored.setdefault("first_seen_at", self._now().astimezone(timezone.utc).isoformat())
         with self._lock:
             existing = self._messages.get(stored["id"])
             if existing:
                 merged = dict(existing)
                 merged.update({key: value for key, value in stored.items() if value not in ("", None)})
+                merged["first_seen_at"] = existing["first_seen_at"]
                 if stored.get("body") and len(str(stored.get("body", ""))) >= len(str(existing.get("body", ""))):
                     merged["body"] = stored["body"]
                     merged["preview"] = stored.get("preview") or existing.get("preview", "")
@@ -343,12 +961,24 @@ class MessageHistory:
             self._persist(stored)
             return stored
 
-    def list(self, direction: str = "") -> list[dict[str, Any]]:
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._messages)
+            self._messages.clear()
+            self._rewrite()
+            return count
+
+    def list(self, direction: str = "", limit: int = HISTORY_DEFAULT_LIMIT) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), HISTORY_MAX_LIMIT))
         with self._lock:
             messages = list(self._messages.values())
         if direction in {"inbound", "outbound"}:
             messages = [item for item in messages if item.get("direction") == direction]
-        return sorted(messages, key=lambda item: (str(item.get("time", "")), str(item.get("id", ""))))
+        return sorted(
+            messages,
+            key=lambda item: (str(item.get("time", "")), str(item.get("id", ""))),
+            reverse=True,
+        )[:limit]
 
     def get(self, message_id_value: str) -> dict[str, Any] | None:
         with self._lock:
@@ -356,26 +986,39 @@ class MessageHistory:
             return dict(item) if item else None
 
 
-def compact_message_record(message: dict[str, Any] | None) -> dict[str, Any] | None:
+def compact_message_record(
+    message: dict[str, Any] | None,
+    *,
+    include_sensitive: bool = True,
+) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return None
     msg_id = str(message.get("id", "")).strip()
     if not msg_id:
         return None
-    preview = str(message.get("preview") or message.get("body") or "").strip()
-    return {
+    compact = {
         "id": msg_id,
         "index": str(message.get("index", "")),
+        "indexes": [str(index) for index in message.get("indexes", []) if str(index)],
+        "is_multipart": bool(message.get("is_multipart")),
+        "multipart_complete": bool(message.get("multipart_complete", True)),
+        "physical_slot_count": int(message.get("physical_slot_count", 0) or 0),
         "direction": str(message.get("direction", "")),
-        "from": str(message.get("from", "")),
-        "to": str(message.get("to", "")),
-        "phone": str(message.get("phone", "")),
         "time": str(message.get("time", "")),
         "status": str(message.get("status", "")),
-        "preview": preview,
         "storage": str(message.get("storage", "")),
         "source": str(message.get("source", "")),
     }
+    if include_sensitive:
+        compact.update(
+            {
+                "from": str(message.get("from", "")),
+                "to": str(message.get("to", "")),
+                "phone": str(message.get("phone", "")),
+                "preview": str(message.get("preview") or message.get("body") or "").strip(),
+            }
+        )
+    return compact
 
 
 def sort_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -434,21 +1077,28 @@ class OpsState:
                 self._data[key] = loaded[key]
         if isinstance(loaded.get("recent_messages"), dict):
             self._data["recent_messages"].update(loaded["recent_messages"])
+        self._data = self._persistable_data()
+        ensure_private_directory(self.path.parent)
+        self._persist()
 
     def _persist(self) -> None:
         if not self.path:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(self.path)
+        atomic_write_private_text(
+            self.path,
+            json.dumps(self._persistable_data(), ensure_ascii=False, indent=2),
+        )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return copy.deepcopy(self._data)
 
     def note_current_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        inbound_messages = [compact_message_record(message) for message in messages if message.get("direction") == "inbound"]
+        inbound_messages = [
+            compact_message_record(message, include_sensitive=True)
+            for message in messages
+            if message.get("direction") == "inbound"
+        ]
         inbound_messages = [item for item in inbound_messages if item and item.get("id")]
         current_ids = [str(message.get("id", "")) for message in messages if message.get("id")]
         inbound_ids = {item["id"] for item in inbound_messages}
@@ -466,7 +1116,9 @@ class OpsState:
                     continue
                 existing_id = str(existing.get("id", ""))
                 if existing_id and existing_id in inbound_ids:
-                    pending_map[existing_id] = compact_message_record(existing) or existing
+                    pending_map[existing_id] = (
+                        compact_message_record(existing, include_sensitive=True) or existing
+                    )
             for item in new_messages:
                 pending_map[item["id"]] = item
 
@@ -479,7 +1131,7 @@ class OpsState:
             return copy.deepcopy(sort_messages(new_messages))
 
     def note_message(self, message: dict[str, Any]) -> None:
-        compact = compact_message_record(message)
+        compact = compact_message_record(message, include_sensitive=True)
         if not compact:
             return
         with self._lock:
@@ -502,9 +1154,33 @@ class OpsState:
                 self._data["recent_messages"]["last_outbound"] = compact
             self._persist()
 
-    def clear_pending_inbound(self, *, index: str = "", phone: str = "") -> None:
+    def _persistable_data(self) -> dict[str, Any]:
+        data = copy.deepcopy(self._data)
+        for key in ("pending_inbound",):
+            values = data.get(key, [])
+            data[key] = [
+                compact_message_record(value, include_sensitive=False)
+                for value in values
+                if compact_message_record(value, include_sensitive=False)
+            ]
+        recent_messages = data.get("recent_messages", {})
+        if isinstance(recent_messages, dict):
+            data["recent_messages"] = {
+                key: compact_message_record(value, include_sensitive=False)
+                for key, value in recent_messages.items()
+            }
+        return data
+
+    def clear_pending_inbound(
+        self,
+        *,
+        index: str = "",
+        phone: str = "",
+        message_id_value: str = "",
+    ) -> None:
         index = str(index or "")
         phone = str(phone or "")
+        message_id_value = str(message_id_value or "")
         with self._lock:
             pending: list[dict[str, Any]] = []
             for existing in self._data.get("pending_inbound", []):
@@ -512,7 +1188,15 @@ class OpsState:
                     continue
                 existing_index = str(existing.get("index", ""))
                 existing_phone = str(existing.get("phone", ""))
-                same_message = bool(index and existing_index == index)
+                existing_id = str(existing.get("id", ""))
+                existing_indexes = {
+                    str(value)
+                    for value in existing.get("indexes", [])
+                    if str(value)
+                }
+                same_message = bool(message_id_value and existing_id == message_id_value)
+                if not same_message and index:
+                    same_message = existing_index == index or index in existing_indexes
                 if same_message and phone:
                     same_message = existing_phone == phone
                 if not same_message:
@@ -827,7 +1511,7 @@ def result_payload(result: CommandResult, *, parsed: Optional[dict[str, str]] = 
         "ok": result.ok,
         "exit_code": result.exit_code,
         "output": result.output,
-        "parsed": parsed if parsed is not None else parse_colon_lines(result.output),
+        "parsed": parsed if parsed is not None else parse_colon_lines(result.stdout),
     }
 
 
@@ -855,6 +1539,77 @@ def is_readonly_at_command(cmd: str) -> bool:
 
 def is_sms_index(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9]+", value) is not None
+
+
+def parse_inbox_records(stdout: str) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    entries = parse_message_blocks(stdout)
+    return entries, [normalize_inbox_entry(entry) for entry in entries]
+
+
+def collect_current_sms_indexes(messages: list[dict[str, Any]]) -> tuple[set[str], str]:
+    current_indexes: set[str] = set()
+    for message in messages:
+        indexes = [str(index) for index in message.get("indexes", [])]
+        if (
+            not indexes
+            or len(indexes) != len(set(indexes))
+            or current_indexes.intersection(indexes)
+        ):
+            return set(), "SMS inbox contains invalid or duplicated indexes; refresh and retry"
+        current_indexes.update(indexes)
+    return current_indexes, ""
+
+
+def parse_verified_inbox_indexes(stdout: str) -> tuple[set[str], str]:
+    clean_output = strip_ansi(stdout)
+    lines = [line.strip() for line in clean_output.splitlines() if line.strip()]
+    if "=== SMS inbox ===" not in lines:
+        return set(), "SMS inbox reread did not contain the expected inbox contract"
+
+    entries, messages = parse_inbox_records(stdout)
+    current_indexes, parse_error = collect_current_sms_indexes(messages)
+    if parse_error:
+        return set(), parse_error
+    if entries:
+        return current_indexes, ""
+
+    allowed_empty_lines = {"=== SMS inbox ===", "No SMS messages found."}
+    if any(line not in allowed_empty_lines for line in lines):
+        return set(), "SMS inbox reread could not be parsed as an empty inbox"
+    return set(), ""
+
+
+def sms_storage_summary_is_strict(summary: dict[str, Any]) -> bool:
+    used = summary.get("storage_used")
+    total = summary.get("storage_total")
+    return (
+        bool(summary.get("storage_name"))
+        and isinstance(used, int)
+        and isinstance(total, int)
+        and total > 0
+        and 0 <= used <= total
+        and isinstance(summary.get("storage_full"), bool)
+    )
+
+
+def strict_sms_timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.strptime((value or "").strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def validate_batch_indexes(value: Any) -> tuple[list[str], str]:
+    if not isinstance(value, list) or not value:
+        return [], "indexes must be a non-empty array"
+    indexes = [item.strip() for item in value if isinstance(item, str)]
+    if len(indexes) != len(value) or any(not is_sms_index(index) for index in indexes):
+        return [], "SMS indexes must be non-negative integer strings"
+    if len(set(indexes)) != len(indexes):
+        return [], "SMS indexes must not contain duplicates"
+    if len(indexes) > MAX_BATCH_DELETE_SLOTS:
+        return [], f"batch deletion supports at most {MAX_BATCH_DELETE_SLOTS} physical SMS slots"
+    return indexes, ""
 
 
 class CardPulseRunner:
@@ -1020,6 +1775,134 @@ printf '%s\n' "$msg"
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+class SmsOperationsAudit:
+    def __init__(self, audit_path: Path | None) -> None:
+        self.audit_path = Path(audit_path) if audit_path else None
+        self._lock = threading.Lock()
+
+    def record(
+        self,
+        *,
+        operation: str,
+        ok: bool,
+        message: str,
+        requested_count: int = 0,
+        command_succeeded_count: int = 0,
+        verified: bool = False,
+        verification_error: str = "",
+        storage: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.audit_path:
+            return
+        audit = {
+            "at": utc_timestamp(),
+            "source": "web",
+            "operation": operation,
+            "ok": ok,
+            "message": message,
+            "requested_count": max(0, int(requested_count)),
+            "command_succeeded_count": max(0, int(command_succeeded_count)),
+            "verified": bool(verified),
+            "verification_error": str(verification_error),
+        }
+        if storage is not None:
+            audit["storage"] = storage
+        with self._lock:
+            append_private_text(self.audit_path, json.dumps(audit, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+class LocalHistoryAudit:
+    def __init__(self, audit_path: Path | None) -> None:
+        self.audit_path = Path(audit_path) if audit_path else None
+        self._lock = threading.Lock()
+
+    def record_clear(self, *, cleared_count: int, ok: bool) -> None:
+        if not self.audit_path:
+            return
+        record = {
+            "at": utc_timestamp(),
+            "operation": "clear_local_history",
+            "ok": bool(ok),
+            "cleared_count": max(0, int(cleared_count)),
+        }
+        with self._lock:
+            append_private_text(self.audit_path, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def record_startup_sms_storage_baseline(
+    runner: CardPulseRunner,
+    operations_audit: SmsOperationsAudit,
+) -> None:
+    try:
+        result = runner.run_cardpulse(["--sms-status"])
+    except subprocess.TimeoutExpired:
+        operations_audit.record(
+            operation="startup_storage_baseline",
+            ok=False,
+            message="SMS storage baseline check timed out",
+        )
+        return
+
+    payload = result_payload(result)
+    summary = parse_sms_status_summary(payload["parsed"])
+    operations_audit.record(
+        operation="startup_storage_baseline",
+        ok=result.ok,
+        message="SMS storage baseline captured" if result.ok else "SMS storage baseline check failed",
+        verified=result.ok,
+        storage=sms_storage_audit_snapshot(summary),
+    )
+
+
+def verify_sms_slots_deleted(
+    runner: CardPulseRunner,
+    requested_indexes: list[str],
+) -> tuple[int, dict[str, Any]]:
+    try:
+        inbox_result = runner.run_cardpulse(["--inbox"])
+        storage_result = runner.run_cardpulse(["--sms-status"])
+    except subprocess.TimeoutExpired:
+        return 504, {
+            "verified": False,
+            "remaining_indexes": [],
+            "storage": {},
+            "verification_error": "SMS deletion verification timed out",
+        }
+
+    storage_payload = result_payload(storage_result)
+    storage_summary = parse_sms_status_summary(storage_payload["parsed"])
+    verification = {
+        "verified": False,
+        "remaining_indexes": [],
+        "storage": sms_storage_audit_snapshot(storage_summary),
+        "verification_error": "",
+    }
+    if not inbox_result.ok:
+        verification["verification_error"] = "SMS inbox reread failed after deletion"
+        return 502, verification
+    if not storage_result.ok:
+        verification["verification_error"] = "SMS storage reread failed after deletion"
+        return 502, verification
+
+    current_indexes, parse_error = parse_verified_inbox_indexes(inbox_result.stdout)
+    if parse_error:
+        verification["verification_error"] = parse_error
+        return 409, verification
+    if not sms_storage_summary_is_strict(storage_summary):
+        verification["verification_error"] = "SMS storage reread could not be parsed"
+        return 409, verification
+
+    requested_set = {str(index) for index in requested_indexes}
+    remaining_indexes = sorted(requested_set.intersection(current_indexes), key=int)
+    verification["remaining_indexes"] = remaining_indexes
+    if remaining_indexes:
+        verification["verification_error"] = "one or more deleted SMS indexes are still present"
+        return 409, verification
+
+    verification["verified"] = True
+    return 200, verification
+
+
 def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or "0")
     if length <= 0:
@@ -1042,9 +1925,30 @@ def make_handler(
     history_path: Optional[Path] = None,
     ops_state_path: Optional[Path] = None,
     recovery_state_path: Optional[Path] = None,
+    operations_audit_path: Optional[Path] = None,
+    history_audit_path: Optional[Path] = None,
+    auth_path: Optional[Path] = None,
+    public_origin: str = "",
+    base_path: str = "",
+    gateway_admin_only: bool = False,
+    scheduler_config_path: Optional[Path] = None,
+    qdc507_acceptance_path: Optional[Path] = None,
 ) -> type[BaseHTTPRequestHandler]:
     history = MessageHistory(history_path)
     ops_state = OpsState(ops_state_path)
+    operation_lock = threading.RLock()
+    operations_audit = SmsOperationsAudit(operations_audit_path)
+    operations_audit_service = operations_audit
+    history_audit = LocalHistoryAudit(history_audit_path)
+    auth_config_path = Path(auth_path) if auth_path else None
+    session_store = SessionStore()
+    configured_public_origin = public_origin.rstrip("/")
+    configured_base_path = "/" + base_path.strip("/") if base_path.strip("/") else ""
+    scheduler_path = Path(scheduler_config_path) if scheduler_config_path else None
+    qdc507_marker_path = Path(qdc507_acceptance_path) if qdc507_acceptance_path else None
+    started_at = utc_timestamp()
+    service_mode = os.environ.get("CARDPULSE_SERVICE_MODE", "diagnostic")
+    state_directory = str(ops_state_path.parent) if ops_state_path else ""
 
     def safe_notify_event(title: str, body: str) -> None:
         notify = getattr(runner, "notify_event", None)
@@ -1083,16 +1987,36 @@ def make_handler(
 
     class CardPulseWebHandler(BaseHTTPRequestHandler):
         server_version = "CardPulseWeb/0.1"
+        operations_audit = operations_audit_service
 
         def log_message(self, fmt: str, *args: object) -> None:
             if os.environ.get("CARDPULSE_WEB_ACCESS_LOG") == "1":
                 super().log_message(fmt, *args)
 
-        def send_json(self, status: int, payload: dict[str, Any]) -> None:
+        def send_security_headers(self) -> None:
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if gateway_admin_only:
+                # fnOS serves the package UI from its own same-origin iframe.
+                self.send_header("X-Frame-Options", "SAMEORIGIN")
+                self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
+            else:
+                self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+
+        def send_json(
+            self,
+            status: int,
+            payload: dict[str, Any],
+            *,
+            cookies: list[str] | None = None,
+        ) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
+            self.send_security_headers()
+            for cookie in cookies or []:
+                self.send_header("Set-Cookie", cookie)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1102,82 +2026,493 @@ def make_handler(
                 body = ui_path.read_bytes()
             else:
                 body = DEFAULT_HTML.encode("utf-8")
+            body = body.replace(b"__CARDPULSE_BASE_PATH__", configured_base_path.encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
+            self.send_security_headers()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def authentication_enabled(self) -> bool:
+            return auth_config_path is not None and not gateway_admin_only
+
+        def gateway_access_allowed(self) -> bool:
+            if not gateway_admin_only:
+                return True
+            return self.headers.get("X-Trim-Isadmin", "").strip().lower() == "true"
+
+        def routed_path(self, raw_path: str) -> str | None:
+            if not configured_base_path:
+                return raw_path
+            if raw_path == configured_base_path:
+                return "/"
+            if raw_path.startswith(configured_base_path + "/"):
+                return raw_path[len(configured_base_path) :]
+            return None
+
+        def request_source(self) -> str:
+            source = self.client_address[0]
+            if source in {"127.0.0.1", "::1"}:
+                forwarded_for = self.headers.get("X-Forwarded-For", "")
+                if forwarded_for:
+                    forwarded_source = forwarded_for.split(",", 1)[0].strip()
+                    if forwarded_source:
+                        return forwarded_source
+            return source
+
+        def request_cookie(self, name: str) -> str:
+            raw_cookie = self.headers.get("Cookie", "")
+            if not raw_cookie:
+                return ""
+            try:
+                cookies = SimpleCookie()
+                cookies.load(raw_cookie)
+                morsel = cookies.get(name)
+            except (KeyError, ValueError):
+                return ""
+            return morsel.value if morsel else ""
+
+        def session_from_request(self) -> Session | None:
+            if not self.authentication_enabled():
+                return None
+            token = self.request_cookie("cardpulse_session")
+            if not token:
+                return None
+            session = session_store.get_session(token)
+            if not session or session.source != self.request_source():
+                return None
+            return session
+
+        def validated_origin_host(self, value: str) -> str:
+            host = value.strip()
+            if host != value or not HOST_HEADER_RE.fullmatch(host):
+                return ""
+            try:
+                parsed = urlparse(f"//{host}")
+                port = parsed.port
+            except ValueError:
+                return ""
+            if not parsed.hostname or (port is not None and not 1 <= port <= 65535):
+                return ""
+            return host.lower()
+
+        def expected_request_origin(self) -> str:
+            if gateway_admin_only:
+                forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
+                forwarded_host = self.headers.get("X-Forwarded-Host", "")
+                # fnOS gateway POSTs must be HTTPS and identify the browser-facing host.
+                # The socket backend is not a browser origin and must never fall back to Host.
+                if not self.gateway_access_allowed() or forwarded_proto.strip().lower() != "https":
+                    return ""
+                normalized_host = self.validated_origin_host(forwarded_host)
+                return f"https://{normalized_host}" if normalized_host else ""
+
+            if configured_public_origin:
+                return configured_public_origin
+
+            host = self.headers.get("Host", "")
+            normalized_host = self.validated_origin_host(host)
+            return f"http://{normalized_host}" if normalized_host else ""
+
+        def origin_is_allowed(self) -> bool:
+            origin = self.headers.get("Origin", "").rstrip("/")
+            if not origin:
+                return False
+            expected_origin = self.expected_request_origin()
+            return bool(expected_origin) and secrets.compare_digest(origin, expected_origin)
+
+        def require_session(self) -> Session | None:
+            if not self.authentication_enabled():
+                return None
+            session = self.session_from_request()
+            if not session:
+                self.send_json(401, {"ok": False, "message": "login required"})
+                return None
+            return session
+
+        def require_authenticated_post(self) -> Session | None:
+            session = self.require_session()
+            if not self.authentication_enabled():
+                return None
+            if not session:
+                return None
+            if not self.origin_is_allowed():
+                self.send_json(403, {"ok": False, "message": "Origin is not allowed"})
+                return None
+            csrf_token = self.headers.get("X-CardPulse-CSRF", "")
+            if not csrf_token or not secrets.compare_digest(csrf_token, session.csrf_token):
+                self.send_json(403, {"ok": False, "message": "CSRF token is invalid or missing"})
+                return None
+            return session
+
+        def require_gateway_post_csrf(self) -> bool:
+            if not gateway_admin_only:
+                return True
+            csrf_token = self.headers.get("X-CardPulse-CSRF", "")
+            csrf_cookie = self.request_cookie(GATEWAY_CSRF_COOKIE)
+            if (
+                not csrf_token
+                or not csrf_cookie
+                or not secrets.compare_digest(csrf_token, csrf_cookie)
+            ):
+                self.send_json(403, {"ok": False, "message": "CSRF token is invalid or missing"})
+                return False
+            if not self.origin_is_allowed():
+                self.send_json(403, {"ok": False, "message": "Origin is not allowed"})
+                return False
+            return True
+
+        def session_cookie(self, token: str) -> str:
+            return (
+                f"cardpulse_session={token}; Path={configured_base_path or '/'}; Max-Age=43200; "
+                "HttpOnly; Secure; SameSite=Strict"
+            )
+
+        def login_csrf_cookie(self, token: str) -> str:
+            return (
+                f"cardpulse_login_csrf={token}; Path={configured_base_path or '/'}; Max-Age=600; "
+                "Secure; SameSite=Strict"
+            )
+
+        def gateway_csrf_cookie(self, token: str) -> str:
+            return (
+                f"{GATEWAY_CSRF_COOKIE}={token}; Path={configured_base_path or '/'}; Max-Age=43200; "
+                "Secure; SameSite=Strict"
+            )
+
+        def expired_session_cookie(self) -> str:
+            return (
+                f"cardpulse_session=; Path={configured_base_path or '/'}; Max-Age=0; "
+                "HttpOnly; Secure; SameSite=Strict"
+            )
+
+        def handle_auth_session(self) -> None:
+            if gateway_admin_only:
+                csrf_token = secrets.token_urlsafe(32)
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "authenticated": True,
+                        "auth_required": False,
+                        "csrf_token": csrf_token,
+                    },
+                    cookies=[self.gateway_csrf_cookie(csrf_token)],
+                )
+                return
+            if not self.authentication_enabled():
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "authenticated": True,
+                        "auth_required": False,
+                        "csrf_token": "",
+                    },
+                )
+                return
+            session = self.session_from_request()
+            if session:
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "authenticated": True,
+                        "auth_required": True,
+                        "csrf_token": session.csrf_token,
+                    },
+                )
+                return
+            login_csrf_token = session_store.issue_login_csrf(self.request_source())
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "authenticated": False,
+                    "auth_required": True,
+                    "configured": bool(auth_config_path and auth_config_path.exists()),
+                    "login_csrf_token": login_csrf_token,
+                },
+                cookies=[self.login_csrf_cookie(login_csrf_token)],
+            )
+
+        def handle_login(self, data: dict[str, Any]) -> None:
+            if not self.authentication_enabled():
+                self.send_json(404, {"ok": False, "message": "web authentication is not configured"})
+                return
+            if not self.origin_is_allowed():
+                self.send_json(403, {"ok": False, "message": "Origin is not allowed"})
+                return
+            source = self.request_source()
+            if session_store.is_login_locked(source):
+                self.send_json(429, {"ok": False, "message": "too many login attempts; try again later"})
+                return
+            login_csrf_token = self.headers.get("X-CardPulse-CSRF", "")
+            if (
+                not login_csrf_token
+                or not secrets.compare_digest(
+                    login_csrf_token,
+                    self.request_cookie("cardpulse_login_csrf"),
+                )
+                or not session_store.consume_login_csrf(source, login_csrf_token)
+            ):
+                self.send_json(403, {"ok": False, "message": "CSRF token is invalid or missing"})
+                return
+            password = data.get("password")
+            if not isinstance(password, str) or not auth_config_path or not verify_password(auth_config_path, password):
+                locked = session_store.record_login_failure(source)
+                self.send_json(
+                    429 if locked else 401,
+                    {
+                        "ok": False,
+                        "message": (
+                            "too many login attempts; try again later"
+                            if locked
+                            else "invalid password or missing password configuration"
+                        ),
+                    },
+                )
+                return
+            session_store.clear_login_failures(source)
+            session = session_store.create_session(source)
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "authenticated": True,
+                    "csrf_token": session.csrf_token,
+                },
+                cookies=[self.session_cookie(session.token)],
+            )
+
+        def handle_logout(self, session: Session) -> None:
+            session_store.delete_session(session.token)
+            self.send_json(
+                200,
+                {"ok": True, "authenticated": False},
+                cookies=[self.expired_session_cookie()],
+            )
+
+        def handle_scheduler(self, data: Optional[dict[str, Any]] = None) -> None:
+            if not scheduler_path:
+                self.send_json(404, {"ok": False, "message": "scheduler controls are unavailable"})
+                return
+            config_reason = keepalive_config_error(scheduler_path)
+            accepted, acceptance_reason = qdc507_readonly_acceptance_status(qdc507_marker_path)
+            reason = config_reason or acceptance_reason
+            if data is None:
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "enabled": scheduler_enabled_from_config(scheduler_path),
+                        "ready": not bool(reason),
+                        "accepted": accepted,
+                        "reason": reason,
+                    },
+                )
+                return
+            enabled = data.get("enabled")
+            if not isinstance(enabled, bool) or data.get("confirm") != "SET_SCHEDULER_ENABLED":
+                self.send_json(400, {"ok": False, "message": "explicit scheduler confirmation is required"})
+                return
+            if enabled:
+                if reason:
+                    self.send_json(
+                        409,
+                        {"ok": False, "enabled": False, "accepted": accepted, "message": reason},
+                    )
+                    return
+            set_scheduler_enabled(scheduler_path, enabled)
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "enabled": enabled,
+                    "ready": not bool(reason),
+                    "accepted": accepted,
+                    "reason": reason,
+                },
+            )
+
+        def handle_keepalive_config(self, data: Optional[dict[str, Any]] = None) -> None:
+            if not scheduler_path:
+                self.send_json(404, {"ok": False, "message": "keepalive configuration is unavailable"})
+                return
+            try:
+                if data is None:
+                    self.send_json(200, {"ok": True, **get_keepalive_config(scheduler_path)})
+                    return
+                phone = data.get("phone")
+                message = data.get("message")
+                interval_days = data.get("interval_days")
+                if not isinstance(phone, str) or not isinstance(message, str):
+                    self.send_json(400, {"ok": False, "message": "SMS recipient and message are required"})
+                    return
+                if isinstance(interval_days, bool) or not isinstance(interval_days, int):
+                    self.send_json(400, {"ok": False, "message": "keepalive interval must be an integer"})
+                    return
+                self.send_json(200, {"ok": True, **set_keepalive_config(scheduler_path, phone, message, interval_days)})
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "message": str(exc)})
+
         def do_GET(self) -> None:  # noqa: N802
             parsed_url = urlparse(self.path)
-            path = parsed_url.path
+            path = self.routed_path(parsed_url.path)
+            if path is None:
+                self.send_json(404, {"ok": False, "message": "not found"})
+                return
+            if not self.gateway_access_allowed():
+                self.send_json(403, {"ok": False, "message": "fnOS administrator access required"})
+                return
             try:
-                if path in ("", "/"):
-                    self.send_html()
-                elif path == "/api/health":
-                    self.send_json(200, {"status": "ok", "sms_enabled": allow_sms})
-                elif path == "/api/doctor":
-                    self.send_json(200, result_payload(runner.run_cardpulse(["--doctor"])))
-                elif path == "/api/info":
-                    payload = result_payload(runner.run_cardpulse(["--info"]))
-                    payload.update(info_summary(payload["parsed"]))
-                    self.send_json(200, payload)
-                elif path == "/api/status":
-                    payload = result_payload(runner.run_cardpulse(["--status"]))
-                    payload.update(parse_status_summary(payload["parsed"]))
-                    self.send_json(200, payload)
-                elif path == "/api/sms/status":
-                    payload = result_payload(runner.run_cardpulse(["--sms-status"]))
-                    payload.update(parse_sms_status_summary(payload["parsed"]))
-                    self.send_json(200, payload)
-                elif path == "/api/overview":
-                    self.handle_overview()
-                elif path == "/api/sms/inbox":
-                    self.send_json(200, result_payload(runner.run_cardpulse(["--inbox"])))
-                elif path.startswith("/api/sms/messages/"):
-                    index = path.rsplit("/", 1)[-1]
-                    if not is_sms_index(index):
-                        self.send_json(400, {"ok": False, "message": "SMS index must be a single non-negative integer"})
+                with operation_lock:
+                    if path in ("", "/"):
+                        self.send_html()
+                    elif path == "/api/health":
+                        payload = {
+                            "status": "ok",
+                            "sms_enabled": allow_sms,
+                            "auth_required": self.authentication_enabled(),
+                        }
+                        session = self.session_from_request()
+                        if session or not self.authentication_enabled():
+                            payload.update(
+                                {
+                                    "authenticated": bool(session) or not self.authentication_enabled(),
+                                    "version": WEB_VERSION,
+                                    "started_at": started_at,
+                                    "state_dir": state_directory,
+                                    "service_mode": service_mode,
+                                }
+                            )
+                        self.send_json(200, payload)
+                    elif path == "/api/auth/session":
+                        self.handle_auth_session()
+                    elif self.authentication_enabled() and not self.require_session():
                         return
-                    self.send_json(200, result_payload(runner.run_cardpulse(["--read-sms", index])))
-                elif path == "/api/messages/current":
-                    self.handle_current_messages()
-                elif path.startswith("/api/messages/current/"):
-                    index = path.rsplit("/", 1)[-1]
-                    self.handle_current_message(index)
-                elif path == "/api/messages/history":
-                    params = parse_qs(parsed_url.query)
-                    direction = params.get("direction", [""])[0]
-                    self.send_json(200, {"ok": True, "messages": history.list(direction)})
-                elif path.startswith("/api/messages/history/"):
-                    item_id = path.rsplit("/", 1)[-1]
-                    item = history.get(item_id)
-                    if not item:
-                        self.send_json(404, {"ok": False, "message": "message not found"})
-                        return
-                    self.send_json(200, {"ok": True, "message": item})
-                else:
-                    self.send_json(404, {"ok": False, "message": "not found"})
+                    elif path == "/api/keepalive-config":
+                        self.handle_keepalive_config()
+                    elif path == "/api/scheduler":
+                        self.handle_scheduler()
+                    elif path == "/api/doctor":
+                        self.send_json(200, result_payload(runner.run_cardpulse(["--doctor"])))
+                    elif path == "/api/info":
+                        payload = result_payload(runner.run_cardpulse(["--info"]))
+                        payload.update(info_summary(payload["parsed"]))
+                        self.send_json(200, payload)
+                    elif path == "/api/status":
+                        payload = result_payload(runner.run_cardpulse(["--status"]))
+                        payload.update(parse_status_summary(payload["parsed"]))
+                        self.send_json(200, payload)
+                    elif path == "/api/sms/status":
+                        payload = result_payload(runner.run_cardpulse(["--sms-status"]))
+                        payload.update(parse_sms_status_summary(payload["parsed"]))
+                        self.send_json(200, payload)
+                    elif path == "/api/overview":
+                        self.handle_overview()
+                    elif path == "/api/sms/inbox":
+                        self.send_json(200, result_payload(runner.run_cardpulse(["--inbox"])))
+                    elif path.startswith("/api/sms/messages/"):
+                        index = path.rsplit("/", 1)[-1]
+                        if not is_sms_index(index):
+                            self.send_json(400, {"ok": False, "message": "SMS index must be a single non-negative integer"})
+                            return
+                        self.send_json(200, result_payload(runner.run_cardpulse(["--read-sms", index])))
+                    elif path == "/api/messages/current":
+                        self.handle_current_messages()
+                    elif path.startswith("/api/messages/current/"):
+                        index = path.rsplit("/", 1)[-1]
+                        self.handle_current_message(index)
+                    elif path == "/api/messages/history":
+                        params = parse_qs(parsed_url.query)
+                        direction = params.get("direction", [""])[0]
+                        try:
+                            limit = int(params.get("limit", [str(HISTORY_DEFAULT_LIMIT)])[0])
+                        except ValueError:
+                            limit = HISTORY_DEFAULT_LIMIT
+                        limit = max(1, min(limit, HISTORY_MAX_LIMIT))
+                        self.send_json(200, {"ok": True, "messages": history.list(direction, limit)})
+                    elif path.startswith("/api/messages/history/"):
+                        item_id = path.rsplit("/", 1)[-1]
+                        item = history.get(item_id)
+                        if not item:
+                            self.send_json(404, {"ok": False, "message": "message not found"})
+                            return
+                        self.send_json(200, {"ok": True, "message": item})
+                    else:
+                        self.send_json(404, {"ok": False, "message": "not found"})
             except subprocess.TimeoutExpired:
                 self.send_json(504, {"ok": False, "message": "command timed out"})
             except Exception as exc:
                 self.send_json(500, {"ok": False, "message": str(exc)})
 
         def do_POST(self) -> None:  # noqa: N802
-            path = urlparse(self.path).path
+            path = self.routed_path(urlparse(self.path).path)
+            if path is None:
+                self.send_json(404, {"ok": False, "message": "not found"})
+                return
+            if not self.gateway_access_allowed():
+                self.send_json(403, {"ok": False, "message": "fnOS administrator access required"})
+                return
+            if not self.require_gateway_post_csrf():
+                return
             try:
                 data = read_json(self)
-                if path == "/api/actions/test-sms":
-                    self.handle_test_sms(data)
-                elif path == "/api/at":
-                    self.handle_at(data)
-                elif path == "/api/sms/delete":
-                    self.handle_delete_sms(data)
-                elif path == "/api/messages/send":
-                    self.handle_send_message(data)
-                else:
-                    self.send_json(404, {"ok": False, "message": "not found"})
+                with operation_lock:
+                    if path == "/api/auth/login":
+                        self.handle_login(data)
+                    elif self.authentication_enabled():
+                        session = self.require_authenticated_post()
+                        if not session:
+                            return
+                        if path == "/api/auth/logout":
+                            self.handle_logout(session)
+                        elif path == "/api/actions/test-sms":
+                            self.handle_test_sms(data)
+                        elif path == "/api/at":
+                            self.handle_at(data)
+                        elif path == "/api/sms/delete":
+                            self.handle_delete_sms(data)
+                        elif path == "/api/sms/delete-batch":
+                            self.handle_delete_sms_batch(data)
+                        elif path == "/api/sms/delete-incomplete":
+                            self.handle_delete_incomplete_sms(data)
+                        elif path == "/api/messages/current/ack":
+                            self.handle_acknowledge_current_message(data)
+                        elif path == "/api/messages/history/clear":
+                            self.handle_clear_local_history(data)
+                        elif path == "/api/messages/send":
+                            self.handle_send_message(data)
+                        elif path == "/api/keepalive-config":
+                            self.handle_keepalive_config(data)
+                        elif path == "/api/scheduler":
+                            self.handle_scheduler(data)
+                        else:
+                            self.send_json(404, {"ok": False, "message": "not found"})
+                    elif path == "/api/actions/test-sms":
+                        self.handle_test_sms(data)
+                    elif path == "/api/at":
+                        self.handle_at(data)
+                    elif path == "/api/sms/delete":
+                        self.handle_delete_sms(data)
+                    elif path == "/api/sms/delete-batch":
+                        self.handle_delete_sms_batch(data)
+                    elif path == "/api/sms/delete-incomplete":
+                        self.handle_delete_incomplete_sms(data)
+                    elif path == "/api/messages/current/ack":
+                        self.handle_acknowledge_current_message(data)
+                    elif path == "/api/messages/history/clear":
+                        self.handle_clear_local_history(data)
+                    elif path == "/api/messages/send":
+                        self.handle_send_message(data)
+                    elif path == "/api/keepalive-config":
+                        self.handle_keepalive_config(data)
+                    elif path == "/api/scheduler":
+                        self.handle_scheduler(data)
+                    else:
+                        self.send_json(404, {"ok": False, "message": "not found"})
             except ValueError as exc:
                 self.send_json(400, {"ok": False, "message": str(exc)})
             except subprocess.TimeoutExpired:
@@ -1262,14 +2597,353 @@ def make_handler(
                 self.send_json(400, {"ok": False, "message": "SMS delete requires confirmation token DELETE_SMS"})
                 return
             payload = result_payload(runner.run_cardpulse(["--delete-sms", index, "--confirm", "DELETE_SMS"]))
-            if payload["ok"]:
+            if not payload["ok"]:
+                payload.update(
+                    {
+                        "verified": False,
+                        "requested_indexes": [index],
+                        "command_succeeded_indexes": [],
+                    }
+                )
+                operations_audit.record(
+                    operation="manual_single_delete",
+                    ok=False,
+                    message="manual SMS deletion command failed",
+                    requested_count=1,
+                )
+                self.send_json(500, payload)
+                return
+
+            verification_status, verification = verify_sms_slots_deleted(runner, [index])
+            payload.update(
+                {
+                    "requested_indexes": [index],
+                    "command_succeeded_indexes": [index],
+                    **verification,
+                }
+            )
+            if verification["verified"]:
                 ops_state.clear_pending_inbound(index=index)
-            self.send_json(200 if payload["ok"] else 500, payload)
+            operations_audit.record(
+                operation="manual_single_delete",
+                ok=bool(verification["verified"]),
+                message=(
+                    "manual SMS deletion verified"
+                    if verification["verified"]
+                    else "manual SMS deletion command completed but verification failed"
+                ),
+                requested_count=1,
+                command_succeeded_count=1,
+                verified=bool(verification["verified"]),
+                verification_error=str(verification["verification_error"]),
+                storage=verification["storage"],
+            )
+            if not verification["verified"]:
+                payload["ok"] = False
+                payload["message"] = "SMS deletion could not be verified"
+            self.send_json(verification_status, payload)
+
+        def handle_delete_sms_batch(self, data: dict[str, Any]) -> None:
+            if data.get("confirm") != "DELETE_SMS_BATCH":
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "message": "batch SMS delete requires confirmation token DELETE_SMS_BATCH",
+                    },
+                )
+                return
+            requested_indexes, validation_error = validate_batch_indexes(data.get("indexes"))
+            if validation_error:
+                self.send_json(400, {"ok": False, "message": validation_error})
+                return
+
+            inbox_result = runner.run_cardpulse(["--inbox"])
+            if not inbox_result.ok:
+                payload = result_payload(inbox_result)
+                payload["message"] = "SMS inbox read failed; batch deletion was not attempted"
+                self.send_json(500, payload)
+                return
+
+            available_indexes, inbox_validation_error = parse_verified_inbox_indexes(inbox_result.stdout)
+            if inbox_validation_error:
+                self.send_json(409, {"ok": False, "message": inbox_validation_error})
+                return
+
+            _, messages = parse_inbox_records(inbox_result.stdout)
+            requested_set = set(requested_indexes)
+            for message in messages:
+                indexes = [str(index) for index in message.get("indexes", [])]
+                if message.get("is_multipart") and requested_set.intersection(indexes):
+                    if not message.get("multipart_complete"):
+                        self.send_json(
+                            409,
+                            {
+                                "ok": False,
+                                "message": "incomplete multipart SMS cannot be batch deleted",
+                            },
+                        )
+                        return
+                    if not set(indexes).issubset(requested_set):
+                        self.send_json(
+                            409,
+                            {
+                                "ok": False,
+                                "message": "multipart SMS must be selected as a complete group",
+                            },
+                        )
+                        return
+
+            missing_indexes = sorted(requested_set - available_indexes, key=int)
+            if missing_indexes:
+                self.send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "message": "one or more selected SMS indexes are no longer present",
+                        "missing_indexes": missing_indexes,
+                    },
+                )
+                return
+
+            deleted_indexes: list[str] = []
+            for index in sorted(requested_indexes, key=int, reverse=True):
+                delete_result = runner.run_cardpulse(["--delete-sms", index, "--confirm", "DELETE_SMS"])
+                if not delete_result.ok:
+                    payload = result_payload(delete_result)
+                    payload.update(
+                        {
+                            "ok": False,
+                            "message": f"batch SMS deletion stopped at index {index}",
+                            "deleted_indexes": deleted_indexes,
+                            "failed_index": index,
+                            "verified": False,
+                            "requested_indexes": requested_indexes,
+                            "command_succeeded_indexes": deleted_indexes,
+                        }
+                    )
+                    operations_audit.record(
+                        operation="manual_batch_delete",
+                        ok=False,
+                        message="manual batch SMS deletion stopped after a delete failure",
+                        requested_count=len(requested_indexes),
+                        command_succeeded_count=len(deleted_indexes),
+                    )
+                    self.send_json(500, payload)
+                    return
+                deleted_indexes.append(index)
+
+            verification_status, verification = verify_sms_slots_deleted(runner, requested_indexes)
+            operations_audit.record(
+                operation="manual_batch_delete",
+                ok=bool(verification["verified"]),
+                message=(
+                    "manual batch SMS deletion verified"
+                    if verification["verified"]
+                    else "manual batch SMS deletion command completed but verification failed"
+                ),
+                requested_count=len(requested_indexes),
+                command_succeeded_count=len(deleted_indexes),
+                verified=bool(verification["verified"]),
+                verification_error=str(verification["verification_error"]),
+                storage=verification["storage"],
+            )
+            if verification["verified"]:
+                for index in requested_indexes:
+                    ops_state.clear_pending_inbound(index=index)
+            self.send_json(
+                verification_status,
+                {
+                    "ok": bool(verification["verified"]),
+                    "message": (
+                        f"deleted {len(deleted_indexes)} SMS storage slots"
+                        if verification["verified"]
+                        else "batch SMS deletion could not be verified"
+                    ),
+                    "deleted_indexes": deleted_indexes,
+                    "failed_index": "",
+                    "requested_indexes": requested_indexes,
+                    "command_succeeded_indexes": deleted_indexes,
+                    **verification,
+                },
+            )
+
+        def handle_delete_incomplete_sms(self, data: dict[str, Any]) -> None:
+            if data.get("confirm") != "FORCE_DELETE_INCOMPLETE_SMS":
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "message": (
+                            "incomplete multipart SMS delete requires confirmation token "
+                            "FORCE_DELETE_INCOMPLETE_SMS"
+                        ),
+                    },
+                )
+                return
+            requested_indexes, validation_error = validate_batch_indexes(data.get("indexes"))
+            if validation_error:
+                self.send_json(400, {"ok": False, "message": validation_error})
+                return
+
+            inbox_result = runner.run_cardpulse(["--inbox"])
+            if not inbox_result.ok:
+                payload = result_payload(inbox_result)
+                payload["message"] = "SMS inbox read failed; incomplete multipart deletion was not attempted"
+                self.send_json(500, payload)
+                return
+
+            _, inbox_validation_error = parse_verified_inbox_indexes(inbox_result.stdout)
+            if inbox_validation_error:
+                self.send_json(409, {"ok": False, "message": inbox_validation_error})
+                return
+
+            _, messages = parse_inbox_records(inbox_result.stdout)
+            requested_set = set(requested_indexes)
+            matching_messages = [
+                message
+                for message in messages
+                if set(str(index) for index in message.get("indexes", [])) == requested_set
+            ]
+            if len(matching_messages) != 1:
+                self.send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "message": (
+                            "selected SMS indexes do not match one current incomplete multipart SMS group"
+                        ),
+                    },
+                )
+                return
+
+            message = matching_messages[0]
+            indexes = [str(index) for index in message.get("indexes", [])]
+            if (
+                not indexes
+                or len(indexes) != len(set(indexes))
+                or not message.get("is_multipart")
+                or message.get("multipart_complete")
+            ):
+                self.send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "message": "force deletion is only available for an incomplete multipart SMS group",
+                    },
+                )
+                return
+
+            deleted_indexes: list[str] = []
+            for index in sorted(indexes, key=int, reverse=True):
+                delete_result = runner.run_cardpulse(["--delete-sms", index, "--confirm", "DELETE_SMS"])
+                if not delete_result.ok:
+                    payload = result_payload(delete_result)
+                    payload.update(
+                        {
+                            "ok": False,
+                            "message": f"incomplete multipart SMS deletion stopped at index {index}",
+                            "deleted_indexes": deleted_indexes,
+                            "failed_index": index,
+                            "verified": False,
+                            "requested_indexes": requested_indexes,
+                            "command_succeeded_indexes": deleted_indexes,
+                        }
+                    )
+                    operations_audit.record(
+                        operation="manual_incomplete_multipart_delete",
+                        ok=False,
+                        message="manual incomplete multipart SMS deletion stopped after a delete failure",
+                        requested_count=len(requested_indexes),
+                        command_succeeded_count=len(deleted_indexes),
+                    )
+                    self.send_json(500, payload)
+                    return
+                deleted_indexes.append(index)
+
+            verification_status, verification = verify_sms_slots_deleted(runner, indexes)
+            operations_audit.record(
+                operation="manual_incomplete_multipart_delete",
+                ok=bool(verification["verified"]),
+                message=(
+                    "manual incomplete multipart SMS deletion verified"
+                    if verification["verified"]
+                    else "manual incomplete multipart SMS deletion command completed but verification failed"
+                ),
+                requested_count=len(indexes),
+                command_succeeded_count=len(deleted_indexes),
+                verified=bool(verification["verified"]),
+                verification_error=str(verification["verification_error"]),
+                storage=verification["storage"],
+            )
+            if verification["verified"]:
+                for index in indexes:
+                    ops_state.clear_pending_inbound(index=index)
+            self.send_json(
+                verification_status,
+                {
+                    "ok": bool(verification["verified"]),
+                    "message": (
+                        f"deleted {len(deleted_indexes)} incomplete multipart SMS storage slots"
+                        if verification["verified"]
+                        else "incomplete multipart SMS deletion could not be verified"
+                    ),
+                    "deleted_indexes": deleted_indexes,
+                    "failed_index": "",
+                    "requested_indexes": indexes,
+                    "command_succeeded_indexes": deleted_indexes,
+                    **verification,
+                },
+            )
+
+        def handle_acknowledge_current_message(self, data: dict[str, Any]) -> None:
+            message_id_value = str(data.get("id", "")).strip()
+            indexes = data.get("indexes")
+            if not message_id_value:
+                self.send_json(400, {"ok": False, "message": "message id is required"})
+                return
+            if not isinstance(indexes, list) or not indexes or any(
+                not is_sms_index(index) for index in indexes
+            ):
+                self.send_json(400, {"ok": False, "message": "SMS indexes are required"})
+                return
+            ops_state.clear_pending_inbound(message_id_value=message_id_value)
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "message": "multipart SMS acknowledgement recorded locally",
+                    "id": message_id_value,
+                    "indexes": indexes,
+                },
+            )
+
+        def handle_clear_local_history(self, data: dict[str, Any]) -> None:
+            if data.get("confirm") != "CLEAR_LOCAL_HISTORY":
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "message": "local history clear requires confirmation token CLEAR_LOCAL_HISTORY",
+                    },
+                )
+                return
+            cleared_count = history.clear()
+            history_audit.record_clear(cleared_count=cleared_count, ok=True)
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "cleared_count": cleared_count,
+                    "message": "local message history cleared",
+                },
+            )
 
         def handle_current_messages(self) -> None:
             result = runner.run_cardpulse(["--inbox"])
             payload = result_payload(result)
-            messages = [normalize_inbox_entry(entry) for entry in parse_message_blocks(result.output)]
+            _, messages = parse_inbox_records(result.stdout)
+            messages = [message for message in messages if message.get("indexes")]
             new_messages: list[dict[str, Any]] = []
 
             if result.ok:
@@ -1298,7 +2972,7 @@ def make_handler(
 
             result = runner.run_cardpulse(["--read-sms", index])
             payload = result_payload(result)
-            blocks = parse_message_blocks(result.output)
+            blocks = parse_message_blocks(result.stdout)
             if result.ok and blocks:
                 message = normalize_sms_message(blocks[0], index=index)
                 stored = history.add(message)
@@ -1364,21 +3038,84 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the local CardPulse Web control server.")
     parser.add_argument("--host", default=os.environ.get("CARDPULSE_WEB_HOST", DEFAULT_HOST))
     parser.add_argument("--port", type=int, default=int(os.environ.get("CARDPULSE_WEB_PORT", DEFAULT_PORT)))
+    parser.add_argument("--socket", default=os.environ.get("CARDPULSE_WEB_SOCKET", ""))
+    parser.add_argument("--base-path", default=os.environ.get("CARDPULSE_WEB_BASE_PATH", ""))
+    parser.add_argument("--fnos-gateway", action="store_true", help="trust fnOS gateway administrator identity")
     parser.add_argument("--root", default=str(ROOT_DIR), help="CardPulse repository or install root")
     parser.add_argument("--allow-sms", action="store_true", help="allow the Web UI to run cardpulse --test")
+    parser.add_argument(
+        "--auth-file",
+        default=os.environ.get("CARDPULSE_WEB_AUTH_FILE", ""),
+        help="path to the CardPulse Web password hash file",
+    )
+    parser.add_argument(
+        "--public-origin",
+        default=os.environ.get("CARDPULSE_WEB_PUBLIC_ORIGIN", ""),
+        help="exact HTTPS origin allowed to submit authenticated requests",
+    )
     return parser
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     root_dir = Path(args.root).resolve()
     ui_path = root_dir / "web" / "index.html"
     allow_sms = args.allow_sms or os.environ.get("CARDPULSE_WEB_ALLOW_SMS") == "1"
 
+    config_dir = Path(os.environ.get("CARDPULSE_CONFIG_DIR", str(root_dir / "config")))
     state_dir = Path(os.environ.get("CARDPULSE_STATE_DIR", str(root_dir / "state")))
     history_path = Path(os.environ.get("CARDPULSE_WEB_HISTORY_PATH", str(state_dir / "messages.jsonl")))
     ops_state_path = Path(os.environ.get("CARDPULSE_WEB_OPS_STATE_PATH", str(state_dir / "web-state.json")))
     recovery_state_path = Path(os.environ.get("CARDPULSE_WEB_RECOVERY_STATE_PATH", str(state_dir / "recovery.json")))
+    operations_audit_path = Path(
+        os.environ.get("CARDPULSE_WEB_OPERATIONS_AUDIT_PATH", str(state_dir / "sms-operations.jsonl"))
+    )
+    history_audit_path = Path(
+        os.environ.get("CARDPULSE_WEB_HISTORY_AUDIT_PATH", str(state_dir / "local-history.jsonl"))
+    )
+    auth_path = Path(args.auth_file) if args.auth_file else config_dir / "web-auth.json"
+    data_dir = Path(os.environ.get("CARDPULSE_DATA_DIR", str(state_dir.parent)))
+    qdc507_default_path = (
+        data_dir / "lifecycle" / "qdc507-readonly-acceptance.json"
+        if args.fnos_gateway
+        else state_dir / "qdc507-readonly-acceptance.json"
+    )
+    qdc507_acceptance_record_path = Path(
+        os.environ.get(
+            "CARDPULSE_QDC507_ACCEPTANCE_PATH",
+            str(qdc507_default_path),
+        )
+    )
+    qdc507_acceptance_path = qdc507_acceptance_record_path if args.fnos_gateway else None
+    if args.fnos_gateway and not args.socket:
+        parser.error("--fnos-gateway requires --socket")
+    if args.fnos_gateway and args.base_path != FNOS_GATEWAY_BASE_PATH:
+        parser.error(f"--fnos-gateway requires --base-path {FNOS_GATEWAY_BASE_PATH}")
+    if args.fnos_gateway and args.public_origin:
+        parser.error("--fnos-gateway does not accept --public-origin")
+
+    strict_permissions = args.fnos_gateway
+    ensure_private_directory(config_dir, strict=strict_permissions)
+    ensure_private_directory(state_dir, strict=strict_permissions)
+    private_files = [
+        config_dir / "config.yaml",
+        auth_path,
+        history_path,
+        ops_state_path,
+        recovery_state_path,
+        operations_audit_path,
+        history_audit_path,
+        state_dir / "last_success",
+        state_dir / "last_success_date",
+        state_dir / "history.log",
+        state_dir / "history.lock",
+        state_dir / "cardpulse.lock",
+    ]
+    if not args.fnos_gateway:
+        private_files.append(qdc507_acceptance_record_path)
+    for private_file in private_files:
+        ensure_private_file(private_file, strict=strict_permissions)
 
     runner = CardPulseRunner(root_dir=root_dir)
     handler = make_handler(
@@ -1388,18 +3125,50 @@ def main(argv: Optional[list[str]] = None) -> int:
         history_path=history_path,
         ops_state_path=ops_state_path,
         recovery_state_path=recovery_state_path,
+        operations_audit_path=operations_audit_path,
+        history_audit_path=history_audit_path,
+        auth_path=auth_path,
+        public_origin=args.public_origin,
+        base_path=args.base_path,
+        gateway_admin_only=args.fnos_gateway,
+        scheduler_config_path=config_dir / "config.yaml",
+        qdc507_acceptance_path=qdc507_acceptance_path,
     )
-    server = ThreadingHTTPServer((args.host, args.port), handler)
-    url = f"http://{args.host}:{args.port}"
+    if args.socket:
+        socket_path = Path(args.socket)
+        if args.fnos_gateway:
+            ensure_gateway_socket_directory(socket_path.parent, strict=True)
+        else:
+            ensure_private_directory(socket_path.parent)
+        if socket_path.exists():
+            socket_path.unlink()
+        server = ThreadingUnixHTTPServer(str(socket_path), handler)
+        try:
+            os.chmod(socket_path, 0o660)
+        except OSError:
+            if args.fnos_gateway:
+                raise
+        if args.fnos_gateway and os.name != "nt" and socket_path.stat().st_mode & 0o777 != 0o660:
+            raise PermissionError(f"cannot secure {socket_path}")
+        url = f"unix://{socket_path}"
+    else:
+        server = ThreadingHTTPServer((args.host, args.port), handler)
+        url = f"http://{args.host}:{args.port}"
     print(f"CardPulse Web listening on {url}")
     if not allow_sms:
         print("SMS sending actions are disabled. Start with --allow-sms to enable guarded SMS endpoints.")
+    record_startup_sms_storage_baseline(runner, handler.operations_audit)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        if args.socket:
+            try:
+                Path(args.socket).unlink()
+            except (FileNotFoundError, OSError):
+                pass
     return 0
 
 

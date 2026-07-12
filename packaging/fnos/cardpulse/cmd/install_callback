@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/cardpulse-device-mode.sh"
+
+# The packaged Compose is no-device by default. A mapping is selected only
+# after the explicit wizard choice and fixed-alias check both pass.
+configure_cardpulse_device_mode_from_wizard

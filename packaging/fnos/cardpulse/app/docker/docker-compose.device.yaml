@@ -1,0 +1,20 @@
+services:
+  cardpulse:
+    image: __CARDPULSE_IMAGE__
+    container_name: cardpulse
+    restart: unless-stopped
+    environment:
+      CARDPULSE_DATA_DIR: /var/lib/cardpulse
+      CARDPULSE_WEB_SOCKET: /run/cardpulse/app.sock
+      CARDPULSE_WEB_BASE_PATH: /app/cardpulse
+      CARDPULSE_FNOS_RUNTIME: "1"
+      CARDPULSE_RUNTIME_IMAGE: "__CARDPULSE_RUNTIME_IMAGE__"
+      CARDPULSE_FPK_VERSION: "__CARDPULSE_FPK_VERSION__"
+      CARDPULSE_SCHEDULER_POLL_SECONDS: "3600"
+    volumes:
+      - ${TRIM_PKGVAR}:/var/lib/cardpulse
+      - ${TRIM_APPDEST}:/run/cardpulse
+    devices:
+      - /dev/cardpulse-at:/dev/cardpulse-at
+    security_opt:
+      - no-new-privileges:true

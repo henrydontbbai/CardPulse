@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/cardpulse-device-mode.sh"
+
+# Preserve the administrator's request but re-check the fixed alias after the
+# new package files have replaced the active Compose file.
+select_cardpulse_device_mode

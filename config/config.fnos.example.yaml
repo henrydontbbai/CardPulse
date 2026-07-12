@@ -1,0 +1,27 @@
+# Default configuration for the fnOS FPK runtime.
+# The host must expose only the validated QDC507 AT interface at this path.
+serial:
+  port: "/dev/cardpulse-at"
+  baudrate: 115200
+  auto_detect: false
+
+sms:
+  phone: ""
+  message: ""
+  interval_days: 179
+  timeout: 30
+
+# A fnOS install or image upgrade must never start automatic sending.
+scheduler:
+  enabled: false
+
+retry:
+  max_attempts: 3
+  interval: 10
+
+notify:
+  enabled: false
+
+logging:
+  level: "INFO"
+  file: "logs/cardpulse.log"

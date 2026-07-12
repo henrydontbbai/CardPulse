@@ -34,7 +34,17 @@ CardPulse 是一个轻量级的 SIM 卡保活工具，通过 AT 命令直接控�
 
 ## 快速开始
 
-### 1. 安装 CardPulse
+> **飞牛 NAS 安装入口**：CardPulse 的目标生产形态是手动上传 `.fpk`，再从飞牛
+> 统一网关 `/app/cardpulse` 打开应用。FPK 不开放 LAN TCP 端口、不使用 Caddy，且
+> 首装默认 no-device 与关闭调度。宿主已验证 `/dev/cardpulse-at` 后，飞牛管理员才能
+> 启用这一个固定设备映射；QDC507 只读验收完成后，才能启用调度。当前尚未在 56 号 NAS
+> 完成真实安装或 QDC507 验收；不要把本节的原生安装器、Caddy 或 `systemd`/cron
+> 命令用于 FPK。详见 [飞牛 NAS 部署](docs/nas-deployment.md)。
+
+### 1. 安装 CardPulse（获授权的非飞牛本地 Linux 开发或诊断）
+
+以下命令仅适用于你拥有写入许可的本地 Linux 开发或诊断主机，不适用于飞牛 FPK，
+也不得在当前 56 号 NAS 的只读核验窗口执行。
 
 ```bash
 # 克隆仓库
@@ -79,9 +89,12 @@ cardpulse --info
 cardpulse --status
 ```
 
-### 4. 设置定时任务
+### 4. 设置定时任务（非飞牛 NAS）
 
-安装脚本默认优先配置 systemd timer；如果 systemd 不可用，则回退到 cron（每天凌晨 2 点执行）。
+这一节仅适用于拥有写入许可的非飞牛 Linux 本地开发或诊断环境。飞牛 FPK 不使用
+`deploy/nas/cardpulse.timer`、Caddy 或 cron；其唯一调度器在容器内运行，并在
+首次安装、容器重启和升级后保持关闭，直到完成 QDC507 只读验收且由飞牛管理员
+显式开启。
 
 ```bash
 sudo systemctl start cardpulse.timer
@@ -121,7 +134,7 @@ serial:
   auto_detect: false
 ```
 
-Linux 安装器、systemd、logrotate 和生产调度仍以 Linux 环境验证为准。
+Linux 安装器、systemd 和 logrotate 只适用于非飞牛 NAS 的本地 Linux 环境。
 
 ## 命令行选项
 
@@ -259,13 +272,11 @@ CardPulse 现在提供一个轻量本地 Web 控制台：浏览器访问本地 H
 python3 scripts/cardpulse-web.py
 ```
 
-默认地址为 `http://127.0.0.1:8765`。在 WSL 中需要从 Windows 浏览器访问时，可以绑定到本地网络接口：
+默认地址为 `http://127.0.0.1:8765`。飞牛 FPK 的生产入口是统一网关
+`/app/cardpulse`，经 Unix socket 接入容器；不要把开发或 WSL Web 直接绑定到
+局域网接口。
 
-```bash
-python3 scripts/cardpulse-web.py --host 0.0.0.0 --port 8765
-```
-
-当前 DJI/Baiwang 模块的推荐主线路径是 **Windows 控制机 + WSL2 + 一键恢复脚本 + 本地 Web 运维面板**：
+当前 Windows + WSL2 一键恢复脚本只用于硬件诊断和恢复验证：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
@@ -273,7 +284,7 @@ powershell -ExecutionPolicy Bypass -File scripts/start-dji-wsl-web.ps1
 
 Web 默认提供状态、诊断、消息中心和只读 AT 查询；真实短信发送默认关闭，只有显式启用后才开放受控发送。
 
-`docs/web-control.md` 是这条 Windows + WSL + Web 运维路径的唯一主文档，集中说明：
+WSL 在当前阶段仅用于硬件诊断和恢复验证。`docs/web-control.md` 说明该诊断路径：
 
 - 一键恢复脚本
 - `recovery.json` 恢复状态文件
@@ -281,6 +292,24 @@ Web 默认提供状态、诊断、消息中心和只读 AT 查询；真实短信
 - 日常检查顺序与短信删除安全约束
 
 产品定位与下一阶段方向见 [docs/product-direction.md](docs/product-direction.md)。
+
+## 飞牛 NAS 产品部署
+
+飞牛 NAS 是 CardPulse 的目标生产宿主；Windows/WSL 仅用于本地开发与诊断。产品入口
+是飞牛应用中心的 CardPulse 与统一网关 `/app/cardpulse`，应用经 Unix socket 接入
+网关，不开放 LAN TCP 端口，也不使用 Caddy。首次安装默认不映射设备；只有管理员
+选择设备模式且宿主已有验证的 `/dev/cardpulse-at` 时，才会映射这一个固定设备。
+
+QDC507 驱动和 `udev` 稳定别名由宿主在单独授权的维护窗口预置，FPK 不修改宿主驱动或
+规则。安装或升级发现旧原生 CardPulse 路径、`systemd` 单元或 cron 条目时，FPK 会
+拒绝继续且不修改宿主服务。QDC507 只读验收、升级/卸载保留行为以及设备拔插和重启
+稳定性尚未在 56 上完整实机验证；其中宿主的物理拔插、AT、SIM 与网络注册已通过，
+但打包后的设备 POC、升级/卸载和重启仍待验收。详情见
+[飞牛 NAS 部署](docs/nas-deployment.md)。
+
+56 的持久驱动绑定使用管理员单独维护的 root-owned helper 和 USB `add` udev 规则；它们
+只加载 `option` 并注册 QDC507 的动态 USB ID，不运行 AT 或短信操作，也不是 FPK 资产。
+构建、安装、升级、卸载和 runtime 均不得创建、修改或调用这些宿主文件。
 
 ## 短信接收 / 收件箱
 
@@ -293,7 +322,7 @@ cardpulse --read-sms 1
 cardpulse --delete-sms 1 --confirm DELETE_SMS
 ```
 
-默认行为仍是只读：读取不会自动删除短信，也不会把短信正文写入状态文件；删除必须显式指定单条索引并输入 `DELETE_SMS`。
+默认行为仍是只读：读取不会自动删除短信，也不会把短信正文写入状态文件；满仓只会告警，不会自动删除。单条删除必须显式指定索引并输入 `DELETE_SMS`。Web 消息中心也支持最多 5 个物理槽位的人工批量删除，需输入 `DELETE_SMS_BATCH`，且不会接受不完整的拼接短信组。残缺拼接短信只能在详情页通过独立的“强制删除”操作处理：服务端会重新读取收件箱、确认所选槽位仍恰好属于同一残缺拼接组，并要求输入 `FORCE_DELETE_INCOMPLETE_SMS`；此操作不可逆。每次人工删除成功后都会复读收件箱与容量，只有确认对应槽位消失才标记为已验证。操作审计只保存数量、结果和验证状态，不保存正文、预览、号码或短信索引。
 
 关于 Web 消息中心、首页容量告警、恢复状态以及 Windows + WSL 日常运维顺序，统一见 [docs/web-control.md](docs/web-control.md)。
 

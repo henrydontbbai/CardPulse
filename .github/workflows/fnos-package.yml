@@ -1,0 +1,180 @@
+name: Build fnOS Package
+
+on:
+  push:
+    branches: [ 'codex/fnos-fpk-release-*' ]
+  workflow_dispatch:
+    inputs:
+      image_repository:
+        description: OCI repository for the amd64 CardPulse image
+        required: true
+        default: ghcr.io/henrydontbbai/cardpulse
+      image_tag:
+        description: Immutable release tag to publish
+        required: true
+        default: 1.1.0-fnos
+      fpk_version:
+        description: CardPulse release version in X.Y.Z form
+        required: true
+        default: 1.1.0
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-fpk:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REPOSITORY: ${{ inputs.image_repository || 'ghcr.io/henrydontbbai/cardpulse' }}
+      IMAGE_TAG: ${{ inputs.image_tag || '1.1.0-fnos' }}
+      FPK_VERSION: ${{ inputs.fpk_version || '1.1.0' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate FPK release version
+        run: printf '%s' "$FPK_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+      - name: Install FPK verifier dependency
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
+      - name: Run release regression suite
+        run: bash tests/run.sh
+      - uses: mengzhuo/setup-fnpack@8ef171e0274432a40e17d912da9d0291d80d4aa9
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish amd64 image
+        id: image
+        run: |
+          metadata_file="$(mktemp)"
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg CARDPULSE_RELEASE_VERSION="$FPK_VERSION" \
+            --tag "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+            --metadata-file "$metadata_file" \
+            --push .
+          digest="$(python3 - "$metadata_file" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              print(json.load(handle).get("containerimage.digest", ""))
+          PY
+          )"
+          printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Make GitHub Container package public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          expected_prefix="ghcr.io/$owner/"
+          case "$IMAGE_REPOSITORY" in
+            "$expected_prefix"*) ;;
+            *)
+              echo "public GHCR publishing only supports $expected_prefix repositories" >&2
+              exit 2
+              ;;
+          esac
+          package_name="${IMAGE_REPOSITORY#"$expected_prefix"}"
+          case "$package_name" in
+            ""|*/*)
+              echo "image repository must name exactly one GHCR package" >&2
+              exit 2
+              ;;
+          esac
+          gh api --method PATCH \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/user/packages/container/$package_name/visibility" \
+            -f visibility=public
+      - name: Verify anonymous GHCR pull
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          image="$IMAGE_REPOSITORY@$IMAGE_DIGEST"
+          docker image rm "$image" >/dev/null 2>&1 || true
+          docker logout ghcr.io >/dev/null
+          for attempt in $(seq 1 12); do
+            if docker pull --platform linux/amd64 "$image"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "anonymous GHCR pull failed for $image" >&2
+          exit 1
+      - name: Run fnOS image smoke test
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          image="$IMAGE_REPOSITORY@$IMAGE_DIGEST"
+          smoke_dir="$(mktemp -d)"
+          cleanup() {
+            docker rm -f cardpulse-fnos-smoke >/dev/null 2>&1 || true
+            rm -rf "$smoke_dir"
+          }
+          trap cleanup EXIT
+          mkdir "$smoke_dir/data" "$smoke_dir/run" \
+            "$smoke_dir/run/docker" "$smoke_dir/run/ui" "$smoke_dir/run/diagnostics"
+          # The package lifecycle creates this directory before the runtime
+          # verifies its ownership and mode.
+          mkdir "$smoke_dir/data/config"
+          chmod 2750 "$smoke_dir/data/config"
+          mkdir "$smoke_dir/data/state"
+          chmod 2770 "$smoke_dir/data/state"
+          cp packaging/fnos/cardpulse/app/docker/docker-compose.yaml \
+            "$smoke_dir/run/docker/docker-compose.yaml"
+          cp packaging/fnos/cardpulse/app/ui/config "$smoke_dir/run/ui/config"
+          cp scripts/fnos-platform-poc.sh "$smoke_dir/run/diagnostics/fnos-platform-poc.sh"
+          docker pull "$image"
+          docker run -d --name cardpulse-fnos-smoke \
+            --security-opt no-new-privileges:true \
+            --mount "type=bind,src=$smoke_dir/data,dst=/var/lib/cardpulse" \
+            --mount "type=bind,src=$smoke_dir/run,dst=/run/cardpulse" \
+            "$image"
+          for _ in $(seq 1 30); do
+            test -S "$smoke_dir/run/app.sock" && break
+            if ! docker ps --format '{{.Names}}' | grep -qx cardpulse-fnos-smoke; then
+              docker logs cardpulse-fnos-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+          test -S "$smoke_dir/run/app.sock"
+          test "$(stat -c %a "$smoke_dir/run")" = 3770
+          test "$(stat -c %g "$smoke_dir/run/app.sock")" = "$(stat -c %g "$smoke_dir/run")"
+          docker exec cardpulse-fnos-smoke sh -ceu '
+            uid="$(id -u cardpulse)"
+            for proc in /proc/[0-9]*; do
+              test "$(awk "/^Uid:/{print \$2}" "$proc/status")" = "$uid" || continue
+              grep -aq "cardpulse_web.py" "$proc/cmdline" && exit 0
+            done
+            exit 1
+          '
+          docker exec cardpulse-fnos-smoke sh -ceu \
+            'grep -A1 "^scheduler:" /var/lib/cardpulse/config/config.yaml | grep -qx "  enabled: false"'
+          test "$(docker exec cardpulse-fnos-smoke /usr/local/bin/cardpulse --version)" = "CardPulse $FPK_VERSION"
+          response="$(curl --fail --silent --show-error --unix-socket "$smoke_dir/run/app.sock" \
+            -H "X-Trim-Isadmin: true" http://localhost/app/cardpulse/api/health)"
+          python3 -c 'import json, sys; assert json.loads(sys.argv[1])["status"] == "ok"' "$response"
+          TRIM_PKGVAR="$smoke_dir/data" TRIM_APPDEST="$smoke_dir/run" \
+            sh scripts/fnos-platform-poc.sh \
+              --socket "$smoke_dir/run/app.sock" \
+              --container cardpulse-fnos-smoke \
+              --record-persistence
+          test -f "$smoke_dir/data/state/fnos-platform-poc.json"
+      - name: Build digest-pinned manual-upload FPK
+        id: fpk
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          fpk_path="$(CARDPULSE_FPK_VERSION="$FPK_VERSION" \
+            CARDPULSE_IMAGE="$IMAGE_REPOSITORY@$IMAGE_DIGEST" sh scripts/build-fnos-fpk.sh)"
+          python3 scripts/verify-fnos-fpk.py "$fpk_path" \
+            --image "$IMAGE_REPOSITORY@$IMAGE_DIGEST" --version "$FPK_VERSION"
+          printf 'path=%s\n' "$fpk_path" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cardpulse-fnos-fpk
+          path: ${{ steps.fpk.outputs.path }}
+          if-no-files-found: error

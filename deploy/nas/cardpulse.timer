@@ -1,0 +1,11 @@
+[Unit]
+Description=CardPulse daily keepalive timer
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=1800
+Unit=cardpulse.service
+
+[Install]
+WantedBy=timers.target

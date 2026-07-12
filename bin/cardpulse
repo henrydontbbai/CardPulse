@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CARDPULSE_LOCK_FILE=""
-VERSION="1.1.0"
+VERSION="${CARDPULSE_VERSION:-1.1.0}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -540,6 +540,26 @@ main() {
         exit 1
     fi
 
+    if [[ "$show_info" == "true" ]]; then
+        local device
+        device=$(sms_detect_device) || device=""
+        if [[ -z "$device" ]]; then
+            echo -e "${RED}[ERROR] No AT serial port found.${NC}" >&2
+            echo "[INFO] Run 'cardpulse --doctor' for read-only diagnostics." >&2
+            exit 1
+        fi
+        local baudrate
+        baudrate=$(config_read ".serial.baudrate" "115200")
+        if at_init "$device" "$baudrate"; then
+            at_show_info
+            at_close
+        else
+            echo -e "${RED}[ERROR] Failed to open serial port.${NC}" >&2
+            exit 1
+        fi
+        exit 0
+    fi
+
     if [[ "$sms_status" == "true" ]]; then
         with_sms_device status
     fi
@@ -594,17 +614,6 @@ main() {
 
     local baudrate
     baudrate=$(config_read ".serial.baudrate" "115200")
-
-    if [[ "$show_info" == "true" ]]; then
-        if at_init "$device" "$baudrate"; then
-            at_show_info
-            at_close
-        else
-            echo -e "${RED}[ERROR] Failed to open serial port.${NC}" >&2
-            exit 1
-        fi
-        exit 0
-    fi
 
     if [[ "$test_mode" == "true" ]]; then
         local phone_masked

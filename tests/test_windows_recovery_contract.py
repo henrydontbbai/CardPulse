@@ -8,6 +8,9 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT_DIR / "scripts" / "start-dji-wsl-web.ps1"
+WEB_PATH = ROOT_DIR / "web" / "index.html"
+README_PATH = ROOT_DIR / "README.md"
+WEB_CONTROL_DOC_PATH = ROOT_DIR / "docs" / "web-control.md"
 
 
 class WindowsRecoveryContractTest(unittest.TestCase):
@@ -17,6 +20,57 @@ class WindowsRecoveryContractTest(unittest.TestCase):
 
         self.assertIn('[int]$Port = 8766', script)
         self.assertIn("start-dji-wsl-web.ps1 -Port 8766", docs)
+
+    def test_windows_recovery_script_has_no_automatic_sms_cleanup_switch(self):
+        script = SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("AutoCleanupOldestOnFull", script)
+        self.assertNotIn("auto-cleanup-oldest-on-full", script)
+
+    def test_automatic_cleanup_is_absent_from_ui_and_documentation(self):
+        script = SCRIPT_PATH.read_text(encoding="utf-8")
+        web = WEB_PATH.read_text(encoding="utf-8")
+        readme = README_PATH.read_text(encoding="utf-8")
+        docs = WEB_CONTROL_DOC_PATH.read_text(encoding="utf-8")
+
+        for content in (script, web, readme, docs):
+            self.assertNotIn("AutoCleanupOldestOnFull", content)
+            self.assertNotIn("auto-cleanup-oldest-on-full", content)
+
+        self.assertNotIn("sms_cleanup", web)
+        self.assertNotIn("cleanup-badge", web)
+        self.assertNotIn("自动清理", web)
+        self.assertNotIn("自动清理", readme)
+        self.assertNotIn("Optional full-store cleanup", docs)
+        self.assertNotIn("Automatic cleanup", docs)
+
+    def test_wsl_recovery_defaults_to_loopback_and_is_diagnostic_only(self):
+        script = SCRIPT_PATH.read_text(encoding="utf-8")
+        readme = README_PATH.read_text(encoding="utf-8")
+        docs = WEB_CONTROL_DOC_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('[string]$HostBind = "127.0.0.1"', script)
+        self.assertIn("WSL 在当前阶段仅用于硬件诊断和恢复验证", readme)
+        self.assertIn("WSL is diagnostic-only in this phase.", docs)
+        self.assertNotIn("0.0.0.0", readme)
+        self.assertNotIn("0.0.0.0", docs)
+
+    def test_documentation_retains_explicit_manual_delete_guidance(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+        docs = WEB_CONTROL_DOC_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("`DELETE_SMS`", readme)
+        self.assertIn("`DELETE_SMS_BATCH`", readme)
+        self.assertIn("`DELETE_SMS`", docs)
+        self.assertIn("`DELETE_SMS_BATCH`", docs)
+
+    def test_wsl_recovery_uses_anonymous_health_only_after_web_auth(self):
+        script = SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('/api/health', script)
+        self.assertNotIn('/api/info"', script)
+        self.assertNotIn('/api/overview"', script)
+        self.assertIn('auth_required = $health.auth_required', script)
 
     def test_bash_templates_are_literal_and_token_expanded(self):
         script = SCRIPT_PATH.read_text(encoding="utf-8")
@@ -57,6 +111,7 @@ class WindowsRecoveryContractTest(unittest.TestCase):
             script.index("Assert-CardPulseWebPort -PortNumber $Port"),
             script.index("Invoke-UsbipdAttach -TargetBusId $TargetBusId"),
         )
+        self.assertNotIn("pkill -f '[s]cripts/cardpulse-web.py'", script)
 
     def test_wsl_capture_tolerates_native_warning_stderr(self):
         script = SCRIPT_PATH.read_text(encoding="utf-8")

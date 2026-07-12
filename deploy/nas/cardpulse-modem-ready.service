@@ -1,0 +1,8 @@
+[Unit]
+Description=Prepare CardPulse QDC507 AT serial port
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/lib/cardpulse/nas-modem-prepare.sh

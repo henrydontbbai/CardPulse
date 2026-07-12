@@ -43,6 +43,11 @@ sms:
   # 发送超时（秒）
   timeout: 30
 
+# Disabled by default after an fnOS installation or upgrade. Enable only after
+# the QDC507 AT device has completed the read-only acceptance procedure.
+scheduler:
+  enabled: false
+
 # 重试配置
 retry:
   # 发送失败时重试次数

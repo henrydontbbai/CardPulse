@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "QDC507 device access",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "Use enabled only after read-only acceptance. If the fixed alias is absent, CardPulse keeps the no-device Compose configuration. Restart the application after changing this setting."
+      },
+      {
+        "type": "select",
+        "field": "wizard_qdc507_device_mode",
+        "label": "QDC507 device mapping",
+        "initValue": "disabled",
+        "options": [
+          {
+            "label": "Disabled (safe default)",
+            "value": "disabled"
+          },
+          {
+            "label": "Enable fixed /dev/cardpulse-at mapping",
+            "value": "enabled"
+          }
+        ]
+      }
+    ]
+  }
+]

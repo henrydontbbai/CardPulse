@@ -1,0 +1,1 @@
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="2ca3", ATTRS{idProduct}=="4006", GROUP="cardpulse", MODE="0660", TAG+="systemd", ENV{SYSTEMD_WANTS}+="cardpulse-modem-ready.service"
